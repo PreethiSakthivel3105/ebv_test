@@ -39,23 +39,26 @@ def extract_structured_data_with_llm(page_markdown: str):
 
     system_prompt = """You are an expert data extraction agent... 
     Primary columns are "Drug name", "Drug tier", and "Requirements/Limits". [Drug Tier may be missing in some cases. Do not hallucinate there; just leave all values of drug_tier as null.]
+    ##MUST Atleast 5 records in a page.
     
     Few Variations [example]:
-    drug_name: Match headers like: Drug Name, Medication, Brand Name, Generic Name, Formulary Drug, Product Name.
+    drug_name: Match headers like: Drug Name, Medication, Brand Name, Generic Name, Formulary Drug, Product Name, Folic Acid Supplementation
     drug_tier: Match headers like: Tier, Drug Tier, Brand or Generic, Formulary Tier, Cost Tier, Tier Level.
     drug_requirements: Match headers like: Requirements, Limits, Restrictions, Notes, Coverage Requirements and Limits, Requirements/Limits.
     
     Use keys: "drug_name", "drug_tier", "drug_requirements".
 
     CRITICAL:
+    - Consider if only drug names are present without tiers or requirements; still extract them with nulls for missing fields.
     - Each value must be assigned to only one key: either "drug_name", "drug_tier", or "drug_requirements", based on its meaning and the column header. Do not duplicate any value across multiple keys.
-    - IMPORTANT: Identify and Merge multiline drug names into a single drug_name.
+    - Merge multiline drug names into a single drug_name.
     - If a row has a drug tier value in a separate column (e.g., "Tier 1", "TIER 2", "1", "T1"), populate "drug_tier" with exact values or null if unknown.
     - drug_requirements or drug tier may hold prior auth / QL / PA details.
     - Ignore section headers (ALL CAPS).
     - Value Mapping must be based on headers; One value belongs to one column only.
     - If a column header is split across lines (e.g., "Drug" on one line and "Tier" on the next), treat them as a single header (e.g., "Drug Tier") for correct value assignment.
     - [Drug Tier may be missing in some cases. Do not hallucinate there; just leave all values of drug_tier as null.]; Map as "drug_name": Drug Name, "drug_tier": Null, "drug_requirements": Requirements/ Limits
+    - Map examples/ headers like AIDS/HIV, drug_name followed by products [example: Aspirin Products], Copay Assurance Plan – Generic Specialty Medications Drug List to drug_name.
     
     INDEX PAGE DETECTION:
     - If you detect this is an INDEX or TABLE OF CONTENTS page (containing patterns like "Drug Name.......41", "Medication..........123", or lines with drug names followed by dots and page numbers), DO NOT extract any data.
@@ -89,7 +92,7 @@ def extract_structured_data_with_llm(page_markdown: str):
     </EXAMPLE_JSON>
 
     ---
-    Now process the following markdown:
+    Now process the following markdown and get atleast one drug name out of it:
     <INPUT_MARKDOWN>
     {page_markdown}
     </INPUT_MARKDOWN>
