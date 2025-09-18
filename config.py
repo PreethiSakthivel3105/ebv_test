@@ -21,10 +21,10 @@ logger = logging.getLogger(__name__)
 # -----------------------------
 load_dotenv()
 
-EXCEL_FILE_PATH = "POC_AUG_Formularies.xlsx"
+EXCEL_FILE_PATH = "Insurance Card Formulary.xlsx"
 PDF_FOLDER = "druglist1"
 MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY")
-PROCESS_COUNT = 16
+PROCESS_COUNT = 10
 LLM_PAGE_WORKERS = 8
 
 DB_CONFIG = {

@@ -7,9 +7,9 @@ import re
 import csv
 
 # --- Config ---
-EXCEL_PATH = r'POC_AUG.xlsx'
-OUTPUT_DIR = Path("genentech_druglist_Updated_04_09")
-START_ROW = 424  # 1-indexed row number
+EXCEL_PATH = r'Insurance Card Formulary.xlsx'
+OUTPUT_DIR = Path("genentech_druglist_Updated_17_09")
+START_ROW = 1  # 1-indexed row number
 
 def sanitize_filename_part(text):
     """Sanitize individual parts of filename (state, company, plan) removing ONLY invalid characters"""
@@ -60,7 +60,7 @@ def main():
     OUTPUT_DIR.mkdir(exist_ok=True)
 
     try:
-        df = pd.read_excel(EXCEL_PATH, sheet_name="Formularies_AUG")
+        df = pd.read_excel(EXCEL_PATH, sheet_name="Insurance")
         print(f"Loaded {len(df)} rows from Excel.")
         df = df.iloc[START_ROW - 1:]
         print(f"Processing rows starting from row {START_ROW}...")
