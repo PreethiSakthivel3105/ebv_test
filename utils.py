@@ -207,15 +207,13 @@ def validate_required_files():
     if not os.path.exists(EXCEL_FILE_PATH):
         raise FileNotFoundError(f"Excel file not found: {EXCEL_FILE_PATH}")
     
-    if not os.path.exists(PDF_FOLDER):
-        raise FileNotFoundError(f"PDF folder not found: {PDF_FOLDER}")
-    
-    # Check if any PDFs exist
-    pdf_files = [f for f in os.listdir(PDF_FOLDER) if f.endswith(".pdf")]
-    if not pdf_files:
-        raise FileNotFoundError(f"No PDF files found in: {PDF_FOLDER}")
-    
-    logger.info(f"Validation passed: Found {len(pdf_files)} PDF files to process")
+    # Remove or comment out the PDF folder checks below:
+    # if not os.path.exists(PDF_FOLDER):
+    #     raise FileNotFoundError(f"PDF folder not found: {PDF_FOLDER}")
+    # pdf_files = [f for f in os.listdir(PDF_FOLDER) if f.endswith(".pdf")]
+    # if not pdf_files:
+    #     raise FileNotFoundError(f"No PDF files found in: {PDF_FOLDER}")
+    # logger.info(f"Validation passed: Found {len(pdf_files)} PDF files to process")
 
 
 def extract_requirements_from_drug_name(drug_name_cell):

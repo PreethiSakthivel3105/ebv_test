@@ -2,12 +2,13 @@ import logging
 import pandas as pd
 from datetime import datetime
 from pathlib import Path
+import uuid
 
 from config import ALL_PROCESSED_DATA, COST_TRACKER
 from database import ensure_database_schema, insert_drug_formulary_data, update_plan_and_payer_statuses, update_drug_formulary_status
 from excel_processing import populate_payer_and_plan_tables
-from pdf_processing import process_pdfs_in_parallel
-from utils import validate_required_files
+from pdf_processing import process_pdfs_from_urls_in_parallel
+from utils import validate_required_files, detect_step_therapy
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +32,7 @@ def save_cumulative_exports(all_processed_data):
     required_columns = {
         "is_prior_authorization_required": "No",
         "is_step_therapy_required": "No", 
+        "is_quantity_limit_applied": "No",   # <-- Add this line
         "status": "processing"
     }
     
@@ -38,6 +40,11 @@ def save_cumulative_exports(all_processed_data):
         if col not in full_df.columns:
             logger.warning(f"Adding missing column '{col}' with default value '{default_value}'")
             full_df[col] = default_value
+    
+    # Map the "is_quantity_limit_applied" column to "Yes"/"No"
+    full_df["is_quantity_limit_applied"] = full_df["is_quantity_limit_applied"].apply(
+        lambda x: "Yes" if str(x).strip().lower() == "yes" else "No"
+    )
     
     output_dir = Path("output_exports")
     if not safe_create_directory(output_dir):
@@ -54,6 +61,7 @@ def save_cumulative_exports(all_processed_data):
             "payer_name", "plan_name", "state_name", "drug_name", 
             "drug_tier", "drug_requirements", "coverage_status",
             "is_prior_authorization_required", "is_step_therapy_required",
+            "is_quantity_limit_applied",   # <-- Add this line
             "status", "file_name", "id", "plan_id", "payer_id"
         ]
         
@@ -80,6 +88,7 @@ def save_cumulative_exports(all_processed_data):
 def main():
     """Main function to run the entire data processing pipeline"""
     processed_plan_ids = []
+    all_processed_data = []  # Initialize this variable to collect all processed data
     try:
         logger.info("========================================")
         logger.info("STARTING DRUG FORMULARY PROCESSING")
@@ -93,7 +102,7 @@ def main():
         populate_payer_and_plan_tables()
         
         # Step 2: Process PDFs in parallel
-        all_processed_data, _ = process_pdfs_in_parallel()
+        all_processed_data, _ = process_pdfs_from_urls_in_parallel()
         
         # Step 3: Insert data into the database
         if all_processed_data:

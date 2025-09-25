@@ -36,10 +36,10 @@ def get_db_connection():
 def ensure_database_schema():
     """Ensure all required tables exist with proper constraints, partitioning, and indexing"""
     logger.info("Ensuring database schema exists...")
-    
+
     with get_db_connection() as conn:
         cursor = conn.cursor()
-        
+
         try:
             # Create payer_details table with status column
             cursor.execute("""
@@ -58,29 +58,29 @@ def ensure_database_schema():
                 );
             """)
             conn.commit()
-            
+
         except Exception as e:
             logger.debug(f"Payer table creation issue (may already exist): {e}")
             conn.rollback()
-        
+
         # Add status column to existing payer_details if not exists
         try:
             cursor.execute("""
-                ALTER TABLE payer_details 
+                ALTER TABLE payer_details
                 ADD COLUMN IF NOT EXISTS status VARCHAR(20) DEFAULT 'processing'
             """)
             conn.commit()
         except Exception as e:
             logger.debug(f"Status column may already exist in payer_details: {e}")
             conn.rollback()
-        
+
         # Add payer constraints in separate transactions
         _add_constraint(conn, cursor, """
-            ALTER TABLE payer_details 
-            ADD CONSTRAINT unique_payer_name_state 
+            ALTER TABLE payer_details
+            ADD CONSTRAINT unique_payer_name_state
             UNIQUE (payer_name, state)
         """, "unique_payer_name_state")
-        
+
         try:
             # Create plan_details table with status column
             cursor.execute("""
@@ -99,15 +99,15 @@ def ensure_database_schema():
                 );
             """)
             conn.commit()
-            
+
         except Exception as e:
             logger.debug(f"Plan table creation issue (may already exist): {e}")
             conn.rollback()
-        
+
         # Add status column to existing plan_details if not exists
         try:
             cursor.execute("""
-                ALTER TABLE plan_details 
+                ALTER TABLE plan_details
                 ADD COLUMN IF NOT EXISTS status VARCHAR(20) DEFAULT 'processing'
             """)
             conn.commit()
@@ -118,7 +118,7 @@ def ensure_database_schema():
         # Add file_hash column to plan_details
         try:
             cursor.execute("""
-                ALTER TABLE plan_details 
+                ALTER TABLE plan_details
                 ADD COLUMN IF NOT EXISTS file_hash VARCHAR(64)
             """)
             conn.commit()
@@ -141,20 +141,20 @@ def ensure_database_schema():
         except Exception as e:
             logger.debug(f"processed_file_cache table creation issue (may already exist): {e}")
             conn.rollback()
-        
+
         # Add plan constraints in separate transactions
         _add_constraint(conn, cursor, """
-            ALTER TABLE plan_details 
-            ADD CONSTRAINT fk_plan_payer 
+            ALTER TABLE plan_details
+            ADD CONSTRAINT fk_plan_payer
             FOREIGN KEY (payer_id) REFERENCES payer_details(payer_id) ON DELETE CASCADE
         """, "fk_plan_payer")
-        
+
         _add_constraint(conn, cursor, """
-            ALTER TABLE plan_details 
-            ADD CONSTRAINT unique_plan_payer_state 
+            ALTER TABLE plan_details
+            ADD CONSTRAINT unique_plan_payer_state
             UNIQUE (payer_id, plan_name, state_name)
         """, "unique_plan_payer_state")
-        
+
         # Create the main partitioned drug_formulary_details table
         try:
             cursor.execute("""
@@ -185,42 +185,92 @@ def ensure_database_schema():
             """)
             conn.commit()
             logger.info("Created partitioned drug_formulary_details table")
-            
+
         except Exception as e:
             logger.debug(f"Drug table creation issue (may already exist): {e}")
             conn.rollback()
-        
+            
+        # <<< START OF ADDITION >>>
+        # Create PP_Formulary_Short_Codes_Ref table for acronyms
+        try:
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS PP_Formulary_Short_Codes_Ref (
+                    id BIGSERIAL PRIMARY KEY,
+                    state_name VARCHAR(100),
+                    payer_name VARCHAR(200),
+                    plan_name VARCHAR(200),
+                    acronym VARCHAR(50),
+                    expansion VARCHAR(255),
+                    explanation TEXT
+                );
+            """)
+            conn.commit()
+            logger.info("Created/ensured PP_Formulary_Short_Codes_Ref table")
+        except Exception as e:
+            logger.debug(f"PP_Formulary_Short_Codes_Ref table creation issue (may already exist): {e}")
+            conn.rollback()
+
+        # Create PP_Tier_Codes_Ref table for tier definitions
+        try:
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS PP_Tier_Codes_Ref (
+                    id BIGSERIAL PRIMARY KEY,
+                    state_name VARCHAR(100),
+                    payer_name VARCHAR(200),
+                    plan_name VARCHAR(200),
+                    acronym VARCHAR(50),
+                    expansion VARCHAR(255),
+                    explanation TEXT
+                );
+            """)
+            conn.commit()
+            logger.info("Created/ensured PP_Tier_Codes_Ref table")
+        except Exception as e:
+            logger.debug(f"PP_Tier_Codes_Ref table creation issue (may already exist): {e}")
+            conn.rollback()
+        # <<< END OF ADDITION >>>
+
         # Add new columns to existing drug_formulary_details if not exists
         try:
             cursor.execute("""
-                ALTER TABLE drug_formulary_details 
+                ALTER TABLE drug_formulary_details
                 ADD COLUMN IF NOT EXISTS is_prior_authorization_required BOOLEAN DEFAULT FALSE
             """)
             conn.commit()
         except Exception as e:
             logger.debug(f"Prior auth column may already exist: {e}")
             conn.rollback()
-        
+
         try:
             cursor.execute("""
-                ALTER TABLE drug_formulary_details 
+                ALTER TABLE drug_formulary_details
                 ADD COLUMN IF NOT EXISTS is_step_therapy_required BOOLEAN DEFAULT FALSE
             """)
             conn.commit()
         except Exception as e:
             logger.debug(f"Step therapy column may already exist: {e}")
             conn.rollback()
-        
+
         try:
             cursor.execute("""
-                ALTER TABLE drug_formulary_details 
+                ALTER TABLE drug_formulary_details
+                ADD COLUMN IF NOT EXISTS is_quantity_limit_applied BOOLEAN DEFAULT FALSE
+            """)
+            conn.commit()
+        except Exception as e:
+            logger.debug(f"Quantity limit column may already exist: {e}")
+            conn.rollback()
+
+        try:
+            cursor.execute("""
+                ALTER TABLE drug_formulary_details
                 ADD COLUMN IF NOT EXISTS status VARCHAR(20) DEFAULT 'processing'
             """)
             conn.commit()
         except Exception as e:
             logger.debug(f"Status column may already exist in drug_formulary_details: {e}")
             conn.rollback()
-        
+
         # Create partitions for better performance with 15-20M records
         # Create 8 partitions based on hash of plan_id
         for i in range(8):
@@ -235,33 +285,33 @@ def ensure_database_schema():
             except Exception as e:
                 logger.debug(f"Partition {i} may already exist: {e}")
                 conn.rollback()
-        
+
         # Add drug table constraints in separate transactions
         _add_constraint(conn, cursor, """
-            ALTER TABLE drug_formulary_details 
-            ADD CONSTRAINT fk_drug_plan 
+            ALTER TABLE drug_formulary_details
+            ADD CONSTRAINT fk_drug_plan
             FOREIGN KEY (plan_id) REFERENCES plan_details(plan_id) ON DELETE CASCADE
         """, "fk_drug_plan")
-        
+
         _add_constraint(conn, cursor, """
-            ALTER TABLE drug_formulary_details 
-            ADD CONSTRAINT fk_drug_payer 
+            ALTER TABLE drug_formulary_details
+            ADD CONSTRAINT fk_drug_payer
             FOREIGN KEY (payer_id) REFERENCES payer_details(payer_id) ON DELETE CASCADE
         """, "fk_drug_payer")
-        
+
         _add_constraint(conn, cursor, """
-            ALTER TABLE drug_formulary_details 
-            ADD CONSTRAINT unique_drug_plan_tier_req 
+            ALTER TABLE drug_formulary_details
+            ADD CONSTRAINT unique_drug_plan_tier_req
             UNIQUE (plan_id, drug_name, drug_tier, drug_requirements)
         """, "unique_drug_plan_tier_req")
-        
+
         # Create comprehensive indexes for 15-20M records
         # Basic indexes
         _add_index(conn, cursor, "CREATE INDEX IF NOT EXISTS idx_payer_name ON payer_details(payer_name)", "idx_payer_name")
         _add_index(conn, cursor, "CREATE INDEX IF NOT EXISTS idx_payer_status ON payer_details(status)", "idx_payer_status")
         _add_index(conn, cursor, "CREATE INDEX IF NOT EXISTS idx_plan_name ON plan_details(plan_name)", "idx_plan_name")
         _add_index(conn, cursor, "CREATE INDEX IF NOT EXISTS idx_plan_status ON plan_details(status)", "idx_plan_status")
-        
+
         # Comprehensive indexes for drug_formulary_details
         _add_index(conn, cursor, "CREATE INDEX IF NOT EXISTS idx_drug_name ON drug_formulary_details(drug_name)", "idx_drug_name")
         _add_index(conn, cursor, "CREATE INDEX IF NOT EXISTS idx_drug_name_lower ON drug_formulary_details(LOWER(drug_name))", "idx_drug_name_lower")
@@ -274,12 +324,12 @@ def ensure_database_schema():
         _add_index(conn, cursor, "CREATE INDEX IF NOT EXISTS idx_step_therapy ON drug_formulary_details(is_step_therapy_required)", "idx_step_therapy")
         _add_index(conn, cursor, "CREATE INDEX IF NOT EXISTS idx_drug_status ON drug_formulary_details(status)", "idx_drug_status")
         _add_index(conn, cursor, "CREATE INDEX IF NOT EXISTS idx_created_at ON drug_formulary_details(created_at)", "idx_created_at")
-        
+
         # Composite indexes for common queries
         _add_index(conn, cursor, "CREATE INDEX IF NOT EXISTS idx_plan_status_drug ON drug_formulary_details(plan_id, status, drug_name)", "idx_plan_status_drug")
         _add_index(conn, cursor, "CREATE INDEX IF NOT EXISTS idx_payer_state_drug ON drug_formulary_details(payer_id, state_name, drug_name)", "idx_payer_state_drug")
         _add_index(conn, cursor, "CREATE INDEX IF NOT EXISTS idx_drug_auth_therapy ON drug_formulary_details(drug_name, is_prior_authorization_required, is_step_therapy_required)", "idx_drug_auth_therapy")
-        
+
         # Text search index for drug names (using GIN for better text search performance)
         try:
             cursor.execute("CREATE EXTENSION IF NOT EXISTS pg_trgm;")
@@ -288,8 +338,8 @@ def ensure_database_schema():
         except Exception as e:
             logger.debug(f"GIN index creation failed (extension may not be available): {e}")
             conn.rollback()
-        
-        logger.info("Database schema ensured successfully with partitioning and comprehensive indexing")    
+
+        logger.info("Database schema ensured successfully with partitioning and comprehensive indexing")
 
 def _add_constraint(conn, cursor, sql, constraint_name):
     """Add a constraint with proper transaction handling"""
@@ -346,7 +396,7 @@ def cache_result(file_hash, structured_data, raw_content):
         try:
             # Convert DataFrame to JSON string for storage
             structured_data_json = structured_data.to_json(orient='split') if not structured_data.empty else '[]'
-            
+
             cursor.execute(
                 """
                 INSERT INTO processed_file_cache (file_hash, structured_data_json, raw_content)
@@ -375,15 +425,15 @@ def insert_drug_formulary_data(processed_data):
 
     with get_db_connection() as conn:
         cursor = conn.cursor()
-        
+
         # The columns must match the order of values in the data tuples
         cols = [
             "id", "plan_id", "payer_id", "drug_name", "ndc_code", "jcode",
             "state_name", "coverage_status", "drug_tier", "drug_requirements",
-            "is_prior_authorization_required", "is_step_therapy_required",
+            "is_prior_authorization_required", "is_step_therapy_required", "is_quantity_limit_applied",
             "coverage_details", "confidence_score", "source_url", "plan_name", "payer_name", "file_name", "status"
         ]
-        
+
         # Prepare the data for execute_values, ensuring order matches `cols`
         data_tuples = []
         for record in processed_data:
@@ -403,12 +453,13 @@ def insert_drug_formulary_data(processed_data):
                 coverage_status = EXCLUDED.coverage_status,
                 is_prior_authorization_required = EXCLUDED.is_prior_authorization_required,
                 is_step_therapy_required = EXCLUDED.is_step_therapy_required,
+                is_quantity_limit_applied = EXCLUDED.is_quantity_limit_applied,
                 source_url = EXCLUDED.source_url,
                 file_name = EXCLUDED.file_name,
                 status = 'completed',  -- Mark as completed on update
                 last_updated_date = CURRENT_TIMESTAMP;
         """
-        
+
         try:
             # Use execute_values for efficient batch insertion
             execute_values(
@@ -420,7 +471,7 @@ def insert_drug_formulary_data(processed_data):
             )
             conn.commit()
             logger.info(f"Successfully inserted or updated {len(data_tuples)} records.")
-            
+
         except IntegrityError as e:
             conn.rollback()
             logger.error(f"Database integrity error during insertion: {e}")
@@ -441,7 +492,7 @@ def update_drug_formulary_status(processed_plan_ids):
         return
 
     logger.info(f"Updating status to 'completed' for drugs in {len(processed_plan_ids)} plans.")
-    
+
     with get_db_connection() as conn:
         cursor = conn.cursor()
         try:
@@ -550,7 +601,7 @@ def process_and_cache_file(file_hash, structured_data, raw_content):
     - raw_content is the original content of the file.
     """
     logger.info(f"Processing and caching file with hash: {file_hash}")
-    
+
     # Extract plan_id, payer_id, and other relevant info from structured_data
     plan_id = structured_data['plan_id'].iloc[0] if 'plan_id' in structured_data else None
     payer_id = structured_data['payer_id'].iloc[0] if 'payer_id' in structured_data else None
@@ -567,3 +618,42 @@ def process_and_cache_file(file_hash, structured_data, raw_content):
     cache_result(file_hash, structured_data, raw_content)
 
     logger.info(f"Successfully processed and cached file: {file_hash}")
+
+def insert_acronyms_to_ref_table(acronyms, state_name, payer_name, plan_name, table_name):
+    """
+    Insert a list of acronyms into the specified reference table.
+    This version removes the ON CONFLICT clause to allow all records to be inserted.
+    """
+    if not acronyms:
+        return
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        
+        # This is now a simple INSERT statement.
+        insert_query = f"""
+            INSERT INTO {table_name} (state_name, payer_name, plan_name, acronym, expansion, explanation)
+            VALUES %s;
+        """
+        
+        # Prepare data for execute_values for efficiency
+        data_tuples = [
+            (
+                state_name,
+                payer_name,
+                plan_name,
+                ac.get("acronym"),
+                ac.get("expansion"),
+                ac.get("explanation"),
+            )
+            for ac in acronyms
+        ]
+        
+        try:
+            # Use execute_values for efficient batch insertion
+            execute_values(cursor, insert_query, data_tuples)
+            conn.commit()
+            logger.info(f"Successfully inserted {len(data_tuples)} records into {table_name}.")
+        except Exception as e:
+            conn.rollback()
+            logger.error(f"Failed to insert acronyms into {table_name}: {e}")
+            raise

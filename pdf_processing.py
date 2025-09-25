@@ -8,9 +8,11 @@ from pathlib import Path
 from mistralai import Mistral
 from mistralai.models import DocumentURLChunk
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
+import requests
+from io import BytesIO
 
 from config import mistral_client, PDF_FOLDER, PROCESS_COUNT, MISTRAL_API_KEY, bedrock, MISTRAL_OCR_COST_PER_1K_PAGES, BEDROCK_COST_PER_1K_TOKENS, LLM_PAGE_WORKERS
-from database import get_db_connection, get_cached_result, cache_result, update_plan_file_hash
+from database import get_db_connection, get_cached_result, cache_result, update_plan_file_hash, insert_acronyms_to_ref_table
 import uuid
 from utils import similarity, normalize_text, clean_drug_name, detect_prior_authorization, detect_step_therapy, calculate_file_hash, rate_limited_api_call, estimate_tokens, track_bedrock_cost, track_mistral_cost, extract_requirements_from_drug_name, determine_coverage_status, track_bedrock_cost_precalculated, normalize_drug_tier, infer_drug_tier_from_text
 
@@ -32,67 +34,58 @@ def extract_structured_data_with_llm(page_markdown: str):
     """
     Uses the fast and cost-effective Claude 3 Haiku model to parse messy markdown,
     correcting multi-line entries and returning clean structured data.
+    Now also extracts all abbreviations/acronyms and their expansions/explanations.
     """
-    logger.info("Extracting structured data from page markdown using Claude 3 Haiku...")
-    
+    logger.info("Extracting structured data and acronyms from page markdown using Claude 3 Haiku...")
+
     costs = {'tokens': 0, 'cost': 0.0, 'calls': 1}
-
-    system_prompt = """You are an expert data extraction agent... 
-    Primary columns are "Drug name", "Drug tier", and "Requirements/Limits". [Drug Tier may be missing in some cases. Do not hallucinate there; just leave all values of drug_tier as null.]
-    ##MUST Atleast 5 records in a page.
     
-    Few Variations [example]:
-    drug_name: Match headers like: Drug Name, Medication, Brand Name, Generic Name, Formulary Drug, Product Name, Folic Acid Supplementation
-    drug_tier: Match headers like: Tier, Drug Tier, Brand or Generic, Formulary Tier, Cost Tier, Tier Level.
-    drug_requirements: Match headers like: Requirements, Limits, Restrictions, Notes, Coverage Requirements and Limits, Requirements/Limits.
-    
-    Use keys: "drug_name", "drug_tier", "drug_requirements".
+    # <<< START OF MODIFICATION >>>
+    # This prompt is now even more specific to filter out non-English terms and other noise.
+    system_prompt = """
+You are a highly specialized data extraction agent for pharmaceutical formularies. Your task is to meticulously extract information ONLY from dedicated "legend", "key", or "glossary" sections on the page.
 
-    CRITICAL:
-    - Consider if only drug names are present without tiers or requirements; still extract them with nulls for missing fields.
-    - Each value must be assigned to only one key: either "drug_name", "drug_tier", or "drug_requirements", based on its meaning and the column header. Do not duplicate any value across multiple keys.
-    - Merge multiline drug names into a single drug_name.
-    - If a row has a drug tier value in a separate column (e.g., "Tier 1", "TIER 2", "1", "T1"), populate "drug_tier" with exact values or null if unknown.
-    - drug_requirements or drug tier may hold prior auth / QL / PA details.
-    - Ignore section headers (ALL CAPS).
-    - Value Mapping must be based on headers; One value belongs to one column only.
-    - If a column header is split across lines (e.g., "Drug" on one line and "Tier" on the next), treat them as a single header (e.g., "Drug Tier") for correct value assignment.
-    - [Drug Tier may be missing in some cases. Do not hallucinate there; just leave all values of drug_tier as null.]; Map as "drug_name": Drug Name, "drug_tier": Null, "drug_requirements": Requirements/ Limits
-    - Map examples/ headers like AIDS/HIV, drug_name followed by products [example: Aspirin Products], Copay Assurance Plan – Generic Specialty Medications Drug List to drug_name.
-    
-    INDEX PAGE DETECTION:
-    - If you detect this is an INDEX or TABLE OF CONTENTS page (containing patterns like "Drug Name.......41", "Medication..........123", or lines with drug names followed by dots and page numbers), DO NOT extract any data.
-    - INDEX INDICATORS: Lines with drug/medication names followed by multiple dots/periods and "ending with numbers" (page references).
-    - If index content is detected, return an empty JSON array.
+From the provided page, you must extract:
+1.  **Drug Formulary Requirement Codes**: These are abbreviations used in the drug tables to denote requirements like Prior Authorization or Quantity Limits. They are typically found in a "Key" or "Requirements/Limits" legend.
+2.  **Drug Tier Definitions**: These define the cost-sharing tiers for drugs (e.g., Tier 1, Preferred Brand). They are often found in a "Drug tier copay levels" or similar section.
+3.  **Drug Table Data**: Extract the main drug list with columns: `drug_name`, `drug_tier`, `drug_requirements`.
 
-    Return ONLY a JSON array of objects with keys drug_name, drug_tier, drug_requirements.
-    """
+**CRITICAL RULES:**
+- **FOCUS ONLY ON LEGENDS**: Extract acronyms and tiers ONLY if they are explicitly defined in a legend, key, or glossary on the page. Ignore abbreviations found in running text, headers, or footers.
+- **IGNORE NON-ENGLISH TEXT**: All extracted acronyms, expansions, and tiers must be in English. For example, DO NOT extract 'Nivel' as a tier.
+- **ACRONYMS (Requirement Codes)**:
+    - **ONLY extract formulary requirement codes** (e.g., PA, QL, ST, MO, LD, B/D, ACS, HRM).
+    - **DO NOT** extract plan types (e.g., HMO, D-SNP, PPO, QMB).
+    - **DO NOT** extract general medical or dosage abbreviations (e.g., HCL, ER, DR, ODT, EA, ML, FDA).
+- **TIERS (Tier Definitions)**:
+    - **ONLY extract English drug tier definitions** (e.g., Tier 1, Tier 2, Preferred, Non-Preferred, Specialty).
+    - **DO NOT** include requirement codes (like MO, LD, QL) in the tiers list.
+
+Return a JSON object with three keys:
+- `"drug_table"`: An array of objects with keys `drug_name`, `drug_tier`, `drug_requirements`.
+- `"acronyms"`: An array of objects ONLY for **formulary requirement codes**, with keys `acronym`, `expansion`, `explanation`.
+- `"tiers"`: An array of objects ONLY for **drug tier definitions**, with keys `acronym`, `expansion`, `explanation`.
+
+If a page has no relevant data, return: `{"drug_table": [], "acronyms": [], "tiers": []}`.
+
+**Example of CORRECT Output:**
+{
+  "drug_table": [
+    {"drug_name": "allopurinol tablet 100mg, 300mg", "drug_tier": null, "drug_requirements": "MO"}
+  ],
+  "acronyms": [
+    {"acronym": "PA", "expansion": "Prior Authorization", "explanation": "Our plan requires you or your prescriber to get prior authorization..."},
+    {"acronym": "QL", "expansion": "Quantity Limits", "explanation": "For certain drugs, our plan limits the amount of the drug..."}
+  ],
+  "tiers": [
+    {"acronym": "Tier 1", "expansion": "Generic", "explanation": "Generic drugs are the low-cost version..."}
+  ]
+}
+"""
+    # <<< END OF MODIFICATION >>>
 
     user_message = f"""
-    <EXAMPLE_INPUT>
-    lipitor 10 mg ................ Tier 1
-    PA; QL
-    atorvastatin 20 mg ................ Tier 2
-    PA
-    </EXAMPLE_INPUT>
-
-    <EXAMPLE_JSON>
-    [
-    {{
-        "drug_name": "lipitor 10 mg",
-        "drug_tier": "Tier 1",
-        "drug_requirements": "PA; QL"
-    }},
-    {{
-        "drug_name": "atorvastatin 20 mg",
-        "drug_tier": "Tier 2",
-        "drug_requirements": "PA"
-    }}
-    ]
-    </EXAMPLE_JSON>
-
-    ---
-    Now process the following markdown and get atleast one drug name out of it:
+    --- Now process the following markdown and extract the required fields:
     <INPUT_MARKDOWN>
     {page_markdown}
     </INPUT_MARKDOWN>
@@ -117,13 +110,13 @@ def extract_structured_data_with_llm(page_markdown: str):
         
         logger.debug(f"Claude 3 Haiku Response: {response_text}")
 
-        json_match = re.search(r'\[.*\]', response_text, re.DOTALL)
+        json_match = re.search(r'\{.*\}', response_text, re.DOTALL)
         if not json_match:
-            json_match = re.search(r'```json\s*(\[.*\])\s*```', response_text, re.DOTALL)
+            json_match = re.search(r'```json\s*(\{.*\})\s*```', response_text, re.DOTALL)
             if not json_match:
-                logger.warning("LLM did not return a valid JSON array.")
-                return [], costs
-        
+                logger.warning("LLM did not return a valid JSON object.")
+                return {"drug_table": [], "acronyms": []}, costs
+
         json_string = json_match.group(1) if '```json' in json_match.group(0) else json_match.group(0)
 
         try:
@@ -137,10 +130,29 @@ def extract_structured_data_with_llm(page_markdown: str):
             except json.JSONDecodeError as e2:
                 logger.error(f"JSON repair failed. The string is likely malformed. Error: {e2}")
                 logger.debug(f"Problematic JSON snippet: {repaired_json_string[:500]}...")
-                return [], costs
+                return {"drug_table": [], "acronyms": []}, costs
 
-        logger.info(f"Successfully extracted {len(structured_data)} records from page.")
+        logger.info(f"Successfully extracted {len(structured_data.get('drug_table', []))} drug records and {len(structured_data.get('acronyms', []))} acronyms from page.")
+        
+        # Post-processing to filter out unwanted terms
+        blocklist = {'nivel'}
+        
+        if 'acronyms' in structured_data:
+            structured_data['acronyms'] = [
+                ac for ac in structured_data.get('acronyms', [])
+                if (ac.get('acronym') or '').lower() not in blocklist and \
+                   (ac.get('expansion') or '').lower() not in blocklist
+            ]
+
+        if 'tiers' in structured_data:
+            structured_data['tiers'] = [
+                tier for tier in structured_data.get('tiers', [])
+                if (tier.get('acronym') or '').lower() not in blocklist and \
+                   (tier.get('expansion') or '').lower() not in blocklist
+            ]
+        
         return structured_data, costs
+    
 
     except Exception as e:
         logger.error(f"Error in Claude 3 Haiku LLM data extraction: {e}")
@@ -148,23 +160,25 @@ def extract_structured_data_with_llm(page_markdown: str):
         return [], costs
 
 
-def process_pdf_with_mistral_ocr(pdf_path, mistral_client, payer_name=None):
+def process_pdf_with_mistral_ocr(pdf_input, mistral_client, payer_name=None):
     """
-    New pipeline:
-    1. Use Mistral OCR to get page-by-page markdown.
-    2. Use a powerful LLM (Claude 3) to parse the markdown into structured JSON.
-    3. Collect all page markdown for the `raw_content` cache.
+    Accepts either a file path (str) or a BytesIO object for the PDF.
     """
-    logger.info(f"Analyzing PDF with parallel LLM pipeline: {os.path.basename(pdf_path)}")
-    
+    logger.info(f"Analyzing PDF with parallel LLM pipeline: {getattr(pdf_input, 'name', pdf_input) if not isinstance(pdf_input, str) else pdf_input}")
+
     total_costs = {'mistral_pages': 0, 'mistral_cost': 0.0, 'bedrock_tokens': 0, 'bedrock_cost': 0.0, 'bedrock_calls': 0}
-    
+
     try:
-        pdf_file = Path(pdf_path)
-        
-        # 1. Upload and OCR with Mistral
+        if isinstance(pdf_input, BytesIO):
+            file_bytes = pdf_input.getvalue()
+            file_name = "temp.pdf"
+        else:
+            pdf_file = Path(pdf_input)
+            file_bytes = pdf_file.read_bytes()
+            file_name = pdf_file.stem
+
         uploaded_file = mistral_client.files.upload(
-            file={"file_name": pdf_file.stem, "content": pdf_file.read_bytes()},
+            file={"file_name": file_name, "content": file_bytes},
             purpose="ocr",
         )
         signed_url = mistral_client.files.get_signed_url(file_id=uploaded_file.id, expiry=60)
@@ -179,6 +193,8 @@ def process_pdf_with_mistral_ocr(pdf_path, mistral_client, payer_name=None):
         total_costs['mistral_cost'] = (page_count / 1000.0) * MISTRAL_OCR_COST_PER_1K_PAGES
         
         all_structured_data = []
+        all_acronyms = []
+        all_tiers = []
         all_raw_pages = []  
 
         # 2. Iterate through pages and use Claude 3 for structured extraction IN PARALLEL
@@ -188,7 +204,7 @@ def process_pdf_with_mistral_ocr(pdf_path, mistral_client, payer_name=None):
             for page_idx, page in enumerate(ocr_response.pages):
                 page_num = page_idx + 1
                 markdown_content = page.markdown
-                
+                print(markdown_content)
                 all_raw_pages.append(markdown_content) 
 
                 if not markdown_content or len(markdown_content.strip()) < 50:
@@ -209,10 +225,13 @@ def process_pdf_with_mistral_ocr(pdf_path, mistral_client, payer_name=None):
                     total_costs['bedrock_calls'] += llm_costs.get('calls', 0)
                     
                     if structured_records:
-                        all_structured_data.extend(structured_records)
+                        # Expecting dict with keys 'drug_table' and 'acronyms'
+                        all_structured_data.extend(structured_records.get('drug_table', []))
+                        all_acronyms.extend(structured_records.get('acronyms', []))
+                        all_tiers.extend(structured_records.get('tiers', []))
                 except Exception as exc:
                     logger.error(f"Page {page_num} generated an exception: {exc}")
-        
+
         # 3. Combine all raw markdown and structured results
         full_raw_content = "\n\n--- PAGE BREAK ---\n\n".join(all_raw_pages) 
         
@@ -228,7 +247,7 @@ def process_pdf_with_mistral_ocr(pdf_path, mistral_client, payer_name=None):
         except Exception as e:
             logger.warning(f"Failed to delete uploaded file: {e}")
          
-        return structured_df, full_raw_content, total_costs
+        return structured_df, full_raw_content, total_costs, all_acronyms, all_tiers
 
     except Exception as e:
         logger.error(f"Error in main PDF processing pipeline: {e}")
@@ -387,8 +406,21 @@ def process_single_pdf_worker(filename: str, pdf_folder_path: str):
         else:
             logger.info(f"{log_prefix} Cache MISS. Starting full processing for hash {file_hash[:10]}...")
             mistral_client = Mistral(api_key=MISTRAL_API_KEY)
-            structured_df, raw_content, costs = process_pdf_with_mistral_ocr(full_path, mistral_client, db_payer_name)
+            structured_df, raw_content, costs, all_acronyms, all_tiers = process_pdf_with_mistral_ocr(full_path, mistral_client, db_payer_name)
             
+            # <<< START OF MODIFICATION >>>
+            # Deduplicate entries found WITHIN this single PDF.
+            dedup_acronyms = deduplicate_dicts(all_acronyms, keys=('acronym', 'expansion', 'explanation'))
+            dedup_tiers = deduplicate_dicts(all_tiers, keys=('acronym', 'expansion', 'explanation'))
+            # <<< END OF MODIFICATION >>>
+
+            # Insert acronyms into requirements table, tiers into tier table
+            if dedup_acronyms:
+                insert_acronyms_to_ref_table(dedup_acronyms, state_name, payer, plan_name, "PP_Formulary_Short_Codes_Ref")
+            if dedup_tiers:
+                insert_acronyms_to_ref_table(dedup_tiers, state_name, payer, plan_name, "PP_Tier_Codes_Ref")
+
+            # Cache the result if structured data is not empty
             if not structured_df.empty:
                 cache_result(file_hash, structured_df, raw_content)
 
@@ -460,3 +492,154 @@ def process_single_pdf_worker(filename: str, pdf_folder_path: str):
         error_message = f"An unexpected error occurred in worker: {e}\n{tb_str}"
         logger.error(f"{log_prefix} ❌ {error_message}")
         return 'ERROR', filename, error_message, zero_costs
+
+def get_all_plans_with_formulary_url():
+    """Fetch all plans with a non-null formulary_url from the database."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT pd.state_name, py.payer_name, pd.plan_name, pd.plan_id, py.payer_id, pd.formulary_url
+            FROM plan_details pd
+            JOIN payer_details py ON pd.payer_id = py.payer_id
+            WHERE pd.formulary_url IS NOT NULL AND pd.formulary_url != ''
+        """)
+        return cursor.fetchall()
+
+def process_single_pdf_url_worker(plan_info):
+    """Worker: Download PDF from URL and process in-memory."""
+    state_name, payer_name, plan_name, plan_id, payer_id, formulary_url = plan_info
+    log_prefix = f"[Worker for {plan_name}]"
+    zero_costs = {'mistral_pages': 0, 'bedrock_tokens': 0, 'bedrock_cost': 0.0, 'bedrock_calls': 0}
+    try:
+        # Download PDF to memory with browser headers
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/122.0.0.0 Safari/537.36"
+            ),
+            "Accept": "application/pdf,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        }
+        resp = requests.get(formulary_url, timeout=60, headers=headers)
+        resp.raise_for_status()
+        content_type = resp.headers.get('Content-Type', '')
+        if 'application/pdf' not in content_type:
+            logger.error(f"{log_prefix} Invalid content type: {content_type}")
+            return 'ERROR', plan_name, f"Invalid content type: {content_type}", zero_costs
+        pdf_bytes = BytesIO(resp.content)
+
+        mistral_client = Mistral(api_key=MISTRAL_API_KEY)
+        # You need to adapt process_pdf_with_mistral_ocr to accept BytesIO instead of a file path:
+        structured_df, raw_content, costs, all_acronyms, all_tiers = process_pdf_with_mistral_ocr(pdf_bytes, mistral_client, payer_name)
+
+        # <<< START OF MODIFICATION >>>
+        # Deduplicate entries found WITHIN this single PDF.
+        dedup_acronyms = deduplicate_dicts(all_acronyms, keys=('acronym', 'expansion', 'explanation'))
+        dedup_tiers = deduplicate_dicts(all_tiers, keys=('acronym', 'expansion', 'explanation'))
+        # <<< END OF MODIFICATION >>>
+
+
+        # Insert acronyms into requirements table, tiers into tier table
+        if dedup_acronyms:
+            insert_acronyms_to_ref_table(dedup_acronyms, state_name, payer_name, plan_name, "PP_Formulary_Short_Codes_Ref")
+        if dedup_tiers:
+            insert_acronyms_to_ref_table(dedup_tiers, state_name, payer_name, plan_name, "PP_Tier_Codes_Ref")
+
+        if structured_df.empty:
+            return 'SKIPPED', plan_name, "No structured data extracted.", costs
+
+        processed_records = []
+        for _, row in structured_df.iterrows():
+            cleaned_drug_name = clean_drug_name(str(row.get('drug_name', '') or ''))
+            requirements_text = str(row.get('drug_requirements', '') or '').strip()
+            if not cleaned_drug_name or len(cleaned_drug_name.strip()) < 2:
+                continue
+            drug_tier_normalized = normalize_drug_tier(row.get('drug_tier', None))
+            if not drug_tier_normalized:
+                drug_tier_normalized = infer_drug_tier_from_text(requirements_text) or infer_drug_tier_from_text(cleaned_drug_name)
+            with get_db_connection() as conn:
+                coverage_status = determine_coverage_status(requirements_text, drug_tier_normalized, conn, state_name, payer_name)
+            # Set PA only if status is "Covered with Conditions" (case-insensitive, allow both singular/plural)
+            is_pa = "Yes" if coverage_status.strip().lower() in ["covered with condition", "covered with conditions"] else "No"
+
+            # Set QL if "QL" is present in requirements or tier (case-insensitive)
+            def has_ql(text):
+                return "ql" in (text or "").lower()
+
+            is_ql = "Yes" if "ql" in requirements_text.lower() else "No"
+            # Set to "Yes" if "ql" is present in requirements_text (case-insensitive)
+            
+
+            record = {
+                "id": str(uuid.uuid4()),
+                "plan_id": plan_id,
+                "payer_id": payer_id,
+                "drug_name": cleaned_drug_name,
+                "ndc_code": None,
+                "jcode": None,
+                "state_name": state_name,
+                "coverage_status": coverage_status,
+                "drug_tier": drug_tier_normalized,
+                "drug_requirements": requirements_text or None,
+                "is_prior_authorization_required": is_pa,
+                "is_step_therapy_required": "Yes" if detect_step_therapy(requirements_text) else "No",
+                "is_quantity_limit_applied": is_ql,
+                "coverage_details": None,
+                "confidence_score": 0.95,
+                "source_url": formulary_url,
+                "plan_name": plan_name,
+                "payer_name": payer_name,
+                "file_name": f"{state_name}_{payer_name}_{plan_name}.pdf"
+            }
+            processed_records.append(record)
+        if processed_records:
+            result_payload = {
+                "processed_records": processed_records,
+                "db_payer_name": payer_name,
+            }
+            return 'SUCCESS', plan_name, result_payload, costs
+        else:
+            return 'SKIPPED', plan_name, "Data extracted, but no valid drug records.", costs
+    except Exception as e:
+        logger.error(f"{log_prefix} Error: {e}")
+        return 'ERROR', plan_name, str(e), zero_costs
+
+def process_pdfs_from_urls_in_parallel():
+    """Process PDFs by downloading from URLs in plan_details, in parallel, in-memory."""
+    logger.info("STEP 2: Processing PDF Files from URLs in plan_details")
+    all_processed_data = []
+    local_raw_content = {}
+
+    plans = get_all_plans_with_formulary_url()
+    if not plans:
+        logger.warning("No plans with formulary URLs found.")
+        return [], {}
+
+    with ProcessPoolExecutor(max_workers=PROCESS_COUNT) as executor:
+        futures = {executor.submit(process_single_pdf_url_worker, plan): plan for plan in plans}
+        for future in as_completed(futures):
+            _, plan_name, result_data, costs = future.result()
+            if isinstance(result_data, dict) and "processed_records" in result_data:
+                all_processed_data.extend(result_data["processed_records"])
+            # Optionally handle errors/skipped here
+
+    logger.info(f"Total structured records aggregated: {len(all_processed_data)}")
+    return all_processed_data, local_raw_content
+
+# <<< START OF MODIFICATION >>>
+def deduplicate_dicts(dicts, keys=('acronym', 'expansion', 'explanation')):
+    """
+    Deduplicate a list of dicts based on the given keys.
+    This now ensures we only remove rows that are completely identical.
+    """
+    # <<< END OF MODIFICATION >>>
+    seen = set()
+    deduped = []
+    for d in dicts:
+        # Create a unique key based on the values of the specified dictionary keys
+        key = tuple((d.get(k) or '').strip().lower() for k in keys)
+        # Add the dictionary if its key hasn't been seen and at least one key has a value
+        if key not in seen and any(key):
+            seen.add(key)
+            deduped.append(d)
+    return deduped

@@ -6,7 +6,7 @@ import nest_asyncio
 import boto3
 import json
 from collections import defaultdict
-
+load_dotenv()
 # Setup
 nest_asyncio.apply()
 logging.basicConfig(
@@ -19,13 +19,15 @@ logger = logging.getLogger(__name__)
 # -----------------------------
 # Configuration
 # -----------------------------
-load_dotenv()
+
 
 EXCEL_FILE_PATH = "Insurance Card Formulary.xlsx"
 PDF_FOLDER = "druglist1"
 MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY")
-PROCESS_COUNT = 10
-LLM_PAGE_WORKERS = 8
+PROCESS_COUNT = 4
+LLM_PAGE_WORKERS = 10
+
+
 
 DB_CONFIG = {
     "dbname": os.getenv("DB_NAME"),
@@ -34,7 +36,7 @@ DB_CONFIG = {
     "host": os.getenv("DB_HOST"),
     "port": os.getenv("DB_PORT"),
 }
-
+print(DB_CONFIG)
 # Target fields for structured extraction
 TARGET_FIELDS = ["drug_name", "drug_tier", "drug_requirements"]
 DB_FIELDS = ["drug_name", "drug_tier", "drug_requirements"]
@@ -80,7 +82,7 @@ bedrock_region = os.getenv('AWS_BEDROCK_REGION', 'us-east-1')
 
 bedrock = boto3.client(
     service_name="bedrock-runtime", 
-    region_name=bedrock_region
-    #aws_access_key_id=access_key,
-    #aws_secret_access_key=secret_key
+    region_name=bedrock_region,
+    aws_access_key_id=access_key,
+    aws_secret_access_key=secret_key
 )
