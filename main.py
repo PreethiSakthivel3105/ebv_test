@@ -21,6 +21,7 @@ def safe_create_directory(path):
         logger.error(f"Failed to create directory {path}: {e}")
         return False
 
+# <<< START OF MODIFICATION >>>
 def save_cumulative_exports(all_processed_data):
     """Save all processed data to Excel and CSV files with enhanced error handling and new columns"""
     if not all_processed_data:
@@ -29,10 +30,11 @@ def save_cumulative_exports(all_processed_data):
     
     full_df = pd.DataFrame(all_processed_data)
     
+    # Ensure all required boolean/status columns exist with a default value
     required_columns = {
         "is_prior_authorization_required": "No",
         "is_step_therapy_required": "No", 
-        "is_quantity_limit_applied": "No",   # <-- Add this line
+        "is_quantity_limit_applied": "No",
         "status": "processing"
     }
     
@@ -41,11 +43,10 @@ def save_cumulative_exports(all_processed_data):
             logger.warning(f"Adding missing column '{col}' with default value '{default_value}'")
             full_df[col] = default_value
     
-    # Map the "is_quantity_limit_applied" column to "Yes"/"No"
-    full_df["is_quantity_limit_applied"] = full_df["is_quantity_limit_applied"].apply(
-        lambda x: "Yes" if str(x).strip().lower() == "yes" else "No"
-    )
-    
+    # Normalize boolean columns to "Yes" or "No"
+    for col in ["is_prior_authorization_required", "is_step_therapy_required", "is_quantity_limit_applied"]:
+         full_df[col] = full_df[col].apply(lambda x: "Yes" if str(x).strip().lower() in ["yes", "true", "1"] else "No")
+
     output_dir = Path("output_exports")
     if not safe_create_directory(output_dir):
         logger.error("Failed to create output directory")
@@ -55,21 +56,18 @@ def save_cumulative_exports(all_processed_data):
     
     try:
         excel_path = output_dir / f"drug_formulary_complete_{timestamp}.xlsx"
-        excel_df = full_df.copy()
         
+        # Define the desired column order for the Excel export
         column_order = [
             "payer_name", "plan_name", "state_name", "drug_name", 
             "drug_tier", "drug_requirements", "coverage_status",
             "is_prior_authorization_required", "is_step_therapy_required",
-            "is_quantity_limit_applied",   # <-- Add this line
+            "is_quantity_limit_applied",
             "status", "file_name", "id", "plan_id", "payer_id"
         ]
         
-        for col in column_order:
-            if col not in excel_df.columns:
-                excel_df[col] = None
-        
-        excel_df = excel_df[column_order]
+        # Reorder dataframe columns, adding any missing ones
+        excel_df = full_df.reindex(columns=column_order)
         
         excel_df.to_excel(excel_path, index=False)
         logger.info(f"Successfully exported data to Excel: {excel_path}")
@@ -84,6 +82,8 @@ def save_cumulative_exports(all_processed_data):
         
     except Exception as e:
         logger.error(f"Error exporting to CSV: {e}")
+# <<< END OF MODIFICATION >>>
+
 
 def main():
     """Main function to run the entire data processing pipeline"""
@@ -101,7 +101,7 @@ def main():
         # Step 1: Populate Payer and Plan tables from Excel
         populate_payer_and_plan_tables()
         
-        # Step 2: Process PDFs in parallel
+        # Step 2: Process PDFs in parallel from URLs
         all_processed_data, _ = process_pdfs_from_urls_in_parallel()
         
         # Step 3: Insert data into the database
@@ -127,11 +127,11 @@ def main():
             if records_removed > 0:
                 logger.warning(f"Removed {records_removed} duplicate records.")
             
-            logger.info("STEP 4: Saving Cumulative Data")
-            save_cumulative_exports(deduplicated_data)
-
+            # Update status to 'completed' for export and DB insertion
+            for record in deduplicated_data:
+                record['status'] = 'completed'
             
-            logger.info(f"Proceeding with {len(deduplicated_data)} unique records.")
+            logger.info(f"Proceeding with {len(deduplicated_data)} unique records for insertion.")
             insert_drug_formulary_data(deduplicated_data)
             
             # Collect unique plan IDs that were successfully processed
@@ -140,9 +140,10 @@ def main():
             # Update status to 'completed' for the inserted drugs
             update_drug_formulary_status(processed_plan_ids)
             
-            # Update status to 'completed' for export
-            for record in deduplicated_data:
-                record['status'] = 'completed'
+            # Step 4: Save cumulative data after all processing and DB operations
+            logger.info("STEP 4: Saving Cumulative Data")
+            save_cumulative_exports(deduplicated_data)
+
         else:
             logger.warning("Skipping database insertion and export as no data was processed.")
 

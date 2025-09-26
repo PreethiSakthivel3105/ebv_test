@@ -40,8 +40,7 @@ def extract_structured_data_with_llm(page_markdown: str):
 
     costs = {'tokens': 0, 'cost': 0.0, 'calls': 1}
     
-    # <<< START OF MODIFICATION >>>
-    # This prompt is now even more specific to filter out non-English terms and other noise.
+    # <<< START OF MODIFICATION: Heavily revised system prompt for accuracy >>>
     system_prompt = """
 You are a highly specialized data extraction agent for pharmaceutical formularies. Your task is to meticulously extract information ONLY from dedicated "legend", "key", or "glossary" sections on the page.
 
@@ -115,7 +114,7 @@ If a page has no relevant data, return: `{"drug_table": [], "acronyms": [], "tie
             json_match = re.search(r'```json\s*(\{.*\})\s*```', response_text, re.DOTALL)
             if not json_match:
                 logger.warning("LLM did not return a valid JSON object.")
-                return {"drug_table": [], "acronyms": []}, costs
+                return {"drug_table": [], "acronyms": [], "tiers": []}, costs
 
         json_string = json_match.group(1) if '```json' in json_match.group(0) else json_match.group(0)
 
@@ -130,9 +129,9 @@ If a page has no relevant data, return: `{"drug_table": [], "acronyms": [], "tie
             except json.JSONDecodeError as e2:
                 logger.error(f"JSON repair failed. The string is likely malformed. Error: {e2}")
                 logger.debug(f"Problematic JSON snippet: {repaired_json_string[:500]}...")
-                return {"drug_table": [], "acronyms": []}, costs
+                return {"drug_table": [], "acronyms": [], "tiers": []}, costs
 
-        logger.info(f"Successfully extracted {len(structured_data.get('drug_table', []))} drug records and {len(structured_data.get('acronyms', []))} acronyms from page.")
+        logger.info(f"Successfully extracted {len(structured_data.get('drug_table', []))} drug records, {len(structured_data.get('acronyms', []))} acronyms, and {len(structured_data.get('tiers', []))} tiers from page.")
         
         # Post-processing to filter out unwanted terms
         blocklist = {'nivel'}
@@ -252,7 +251,7 @@ def process_pdf_with_mistral_ocr(pdf_input, mistral_client, payer_name=None):
     except Exception as e:
         logger.error(f"Error in main PDF processing pipeline: {e}")
         traceback.print_exc()
-        return pd.DataFrame(), "", total_costs
+        return pd.DataFrame(), "", total_costs, [], []
 
 def get_plan_and_payer_info(state_name, payer, plan_name):
     """Get plan_id and payer_id from database with a more robust, query-based approach."""
@@ -409,9 +408,9 @@ def process_single_pdf_worker(filename: str, pdf_folder_path: str):
             structured_df, raw_content, costs, all_acronyms, all_tiers = process_pdf_with_mistral_ocr(full_path, mistral_client, db_payer_name)
             
             # <<< START OF MODIFICATION >>>
-            # Deduplicate entries found WITHIN this single PDF.
-            dedup_acronyms = deduplicate_dicts(all_acronyms, keys=('acronym', 'expansion', 'explanation'))
-            dedup_tiers = deduplicate_dicts(all_tiers, keys=('acronym', 'expansion', 'explanation'))
+            # Deduplicate entries found WITHIN this single PDF before inserting.
+            dedup_acronyms = deduplicate_dicts(all_acronyms)
+            dedup_tiers = deduplicate_dicts(all_tiers)
             # <<< END OF MODIFICATION >>>
 
             # Insert acronyms into requirements table, tiers into tier table
@@ -449,6 +448,8 @@ def process_single_pdf_worker(filename: str, pdf_folder_path: str):
                     drug_tier_normalized = infer_drug_tier_from_text(requirements_text) or infer_drug_tier_from_text(raw_drug_name)
                 with get_db_connection() as conn:
                     coverage_status = determine_coverage_status(requirements_text, drug_tier_normalized, conn, state_name, db_payer_name)
+                
+                is_ql = "Yes" if "ql" in (requirements_text or "").lower() else "No"
 
                 record = {
                     "id": str(uuid.uuid4()),
@@ -463,6 +464,7 @@ def process_single_pdf_worker(filename: str, pdf_folder_path: str):
                     "drug_requirements": requirements_text or None,
                     "is_prior_authorization_required": "Yes" if detect_prior_authorization(requirements_text) else "No",
                     "is_step_therapy_required": "Yes" if detect_step_therapy(requirements_text) else "No",
+                    "is_quantity_limit_applied": is_ql,
                     "coverage_details": None,
                     "confidence_score": 0.95,
                     "source_url": formulary_url,
@@ -529,15 +531,14 @@ def process_single_pdf_url_worker(plan_info):
         pdf_bytes = BytesIO(resp.content)
 
         mistral_client = Mistral(api_key=MISTRAL_API_KEY)
-        # You need to adapt process_pdf_with_mistral_ocr to accept BytesIO instead of a file path:
+        # Pass BytesIO object to the processing function
         structured_df, raw_content, costs, all_acronyms, all_tiers = process_pdf_with_mistral_ocr(pdf_bytes, mistral_client, payer_name)
 
         # <<< START OF MODIFICATION >>>
-        # Deduplicate entries found WITHIN this single PDF.
-        dedup_acronyms = deduplicate_dicts(all_acronyms, keys=('acronym', 'expansion', 'explanation'))
-        dedup_tiers = deduplicate_dicts(all_tiers, keys=('acronym', 'expansion', 'explanation'))
+        # Deduplicate entries found WITHIN this single PDF before inserting.
+        dedup_acronyms = deduplicate_dicts(all_acronyms)
+        dedup_tiers = deduplicate_dicts(all_tiers)
         # <<< END OF MODIFICATION >>>
-
 
         # Insert acronyms into requirements table, tiers into tier table
         if dedup_acronyms:
@@ -554,21 +555,17 @@ def process_single_pdf_url_worker(plan_info):
             requirements_text = str(row.get('drug_requirements', '') or '').strip()
             if not cleaned_drug_name or len(cleaned_drug_name.strip()) < 2:
                 continue
+            
             drug_tier_normalized = normalize_drug_tier(row.get('drug_tier', None))
             if not drug_tier_normalized:
                 drug_tier_normalized = infer_drug_tier_from_text(requirements_text) or infer_drug_tier_from_text(cleaned_drug_name)
+                
             with get_db_connection() as conn:
                 coverage_status = determine_coverage_status(requirements_text, drug_tier_normalized, conn, state_name, payer_name)
-            # Set PA only if status is "Covered with Conditions" (case-insensitive, allow both singular/plural)
-            is_pa = "Yes" if coverage_status.strip().lower() in ["covered with condition", "covered with conditions"] else "No"
-
-            # Set QL if "QL" is present in requirements or tier (case-insensitive)
-            def has_ql(text):
-                return "ql" in (text or "").lower()
-
-            is_ql = "Yes" if "ql" in requirements_text.lower() else "No"
-            # Set to "Yes" if "ql" is present in requirements_text (case-insensitive)
             
+            is_pa = "Yes" if detect_prior_authorization(requirements_text) else "No"
+            is_st = "Yes" if detect_step_therapy(requirements_text) else "No"
+            is_ql = "Yes" if "ql" in (requirements_text or "").lower() else "No"
 
             record = {
                 "id": str(uuid.uuid4()),
@@ -582,7 +579,7 @@ def process_single_pdf_url_worker(plan_info):
                 "drug_tier": drug_tier_normalized,
                 "drug_requirements": requirements_text or None,
                 "is_prior_authorization_required": is_pa,
-                "is_step_therapy_required": "Yes" if detect_step_therapy(requirements_text) else "No",
+                "is_step_therapy_required": is_st,
                 "is_quantity_limit_applied": is_ql,
                 "coverage_details": None,
                 "confidence_score": 0.95,
@@ -592,54 +589,88 @@ def process_single_pdf_url_worker(plan_info):
                 "file_name": f"{state_name}_{payer_name}_{plan_name}.pdf"
             }
             processed_records.append(record)
+            
         if processed_records:
             result_payload = {
                 "processed_records": processed_records,
-                "db_payer_name": payer_name,
+                "db_payer_name": payer_name, # Note: Using payer_name from DB
             }
             return 'SUCCESS', plan_name, result_payload, costs
         else:
             return 'SKIPPED', plan_name, "Data extracted, but no valid drug records.", costs
+            
     except Exception as e:
-        logger.error(f"{log_prefix} Error: {e}")
+        logger.error(f"{log_prefix} Error: {e}", exc_info=True)
         return 'ERROR', plan_name, str(e), zero_costs
 
 def process_pdfs_from_urls_in_parallel():
     """Process PDFs by downloading from URLs in plan_details, in parallel, in-memory."""
     logger.info("STEP 2: Processing PDF Files from URLs in plan_details")
     all_processed_data = []
-    local_raw_content = {}
 
     plans = get_all_plans_with_formulary_url()
     if not plans:
         logger.warning("No plans with formulary URLs found.")
         return [], {}
 
+    success_count, error_count, skipped_count = 0, 0, 0
     with ProcessPoolExecutor(max_workers=PROCESS_COUNT) as executor:
         futures = {executor.submit(process_single_pdf_url_worker, plan): plan for plan in plans}
+        
         for future in as_completed(futures):
-            _, plan_name, result_data, costs = future.result()
-            if isinstance(result_data, dict) and "processed_records" in result_data:
-                all_processed_data.extend(result_data["processed_records"])
-            # Optionally handle errors/skipped here
+            original_plan_info = futures[future]
+            plan_name_log = original_plan_info # Get plan_name for logging
+            
+            try:
+                status, _, result_data, costs = future.result()
 
+                if status == 'SUCCESS':
+                    logger.info(f"Aggregating results for SUCCESSFUL plan: {plan_name_log}")
+                    success_count += 1
+                    
+                    payer_name = result_data['db_payer_name']
+                    if costs['mistral_pages'] > 0:
+                        track_mistral_cost(payer_name, costs['mistral_pages'])
+                    if costs['bedrock_tokens'] > 0:
+                        track_bedrock_cost_precalculated(
+                            payer_name,
+                            costs['bedrock_tokens'],
+                            costs['bedrock_cost'],
+                            costs['bedrock_calls']
+                        )
+
+                    all_processed_data.extend(result_data["processed_records"])
+                
+                elif status == 'SKIPPED':
+                    logger.warning(f"Skipped plan: {plan_name_log}. Reason: {result_data}")
+                    skipped_count += 1
+                
+                elif status == 'ERROR':
+                    logger.error(f"Error processing plan: {plan_name_log}. Reason: {result_data}")
+                    error_count += 1
+            
+            except Exception as e:
+                logger.error(f"A critical error occurred while processing the result for {plan_name_log}: {e}", exc_info=True)
+                error_count += 1
+
+    logger.info("--- URL PDF Processing Complete ---")
+    logger.info(f"Summary: {success_count} successful, {error_count} failed, {skipped_count} skipped")
     logger.info(f"Total structured records aggregated: {len(all_processed_data)}")
-    return all_processed_data, local_raw_content
-
-# <<< START OF MODIFICATION >>>
+    return all_processed_data, {}
+ 
 def deduplicate_dicts(dicts, keys=('acronym', 'expansion', 'explanation')):
     """
-    Deduplicate a list of dicts based on the given keys.
-    This now ensures we only remove rows that are completely identical.
+    Deduplicate a list of dicts based on the given keys, ignoring case and whitespace.
+    This ensures we only remove rows that are functionally identical.
     """
-    # <<< END OF MODIFICATION >>>
     seen = set()
     deduped = []
     for d in dicts:
-        # Create a unique key based on the values of the specified dictionary keys
+        # Create a unique key based on the cleaned, lowercased values of the specified dictionary keys
         key = tuple((d.get(k) or '').strip().lower() for k in keys)
-        # Add the dictionary if its key hasn't been seen and at least one key has a value
-        if key not in seen and any(key):
+        
+        # Add the dictionary if its key hasn't been seen and at least one key has a non-empty value
+        if key not in seen and any(val for val in key):
             seen.add(key)
             deduped.append(d)
     return deduped

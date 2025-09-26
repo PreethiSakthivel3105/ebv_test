@@ -190,7 +190,6 @@ def ensure_database_schema():
             logger.debug(f"Drug table creation issue (may already exist): {e}")
             conn.rollback()
             
-        # <<< START OF ADDITION >>>
         # Create PP_Formulary_Short_Codes_Ref table for acronyms
         try:
             cursor.execute("""
@@ -200,7 +199,7 @@ def ensure_database_schema():
                     payer_name VARCHAR(200),
                     plan_name VARCHAR(200),
                     acronym VARCHAR(50),
-                    expansion VARCHAR(255),
+                    expansion TEXT,
                     explanation TEXT
                 );
             """)
@@ -219,7 +218,7 @@ def ensure_database_schema():
                     payer_name VARCHAR(200),
                     plan_name VARCHAR(200),
                     acronym VARCHAR(50),
-                    expansion VARCHAR(255),
+                    expansion TEXT,
                     explanation TEXT
                 );
             """)
@@ -228,7 +227,6 @@ def ensure_database_schema():
         except Exception as e:
             logger.debug(f"PP_Tier_Codes_Ref table creation issue (may already exist): {e}")
             conn.rollback()
-        # <<< END OF ADDITION >>>
 
         # Add new columns to existing drug_formulary_details if not exists
         try:
@@ -622,18 +620,13 @@ def process_and_cache_file(file_hash, structured_data, raw_content):
 def insert_acronyms_to_ref_table(acronyms, state_name, payer_name, plan_name, table_name):
     """
     Insert a list of acronyms into the specified reference table.
-    This version removes the ON CONFLICT clause to allow all records to be inserted.
+    This version prevents the insertion of duplicate records for the same plan.
     """
     if not acronyms:
         return
+        
     with get_db_connection() as conn:
         cursor = conn.cursor()
-        
-        # This is now a simple INSERT statement.
-        insert_query = f"""
-            INSERT INTO {table_name} (state_name, payer_name, plan_name, acronym, expansion, explanation)
-            VALUES %s;
-        """
         
         # Prepare data for execute_values for efficiency
         data_tuples = [
@@ -645,14 +638,26 @@ def insert_acronyms_to_ref_table(acronyms, state_name, payer_name, plan_name, ta
                 ac.get("expansion"),
                 ac.get("explanation"),
             )
-            for ac in acronyms
+            for ac in acronyms if ac.get("acronym") # Ensure acronym is not null
         ]
+
+        if not data_tuples:
+            logger.warning(f"No valid acronyms to insert into {table_name}.")
+            return
+
+        # Use ON CONFLICT to prevent inserting the exact same record multiple times
+        # Note: The ON CONFLICT target columns should form a unique constraint.
+        # A good candidate is (plan_name, acronym, expansion)
+        insert_query = f"""
+            INSERT INTO {table_name} (state_name, payer_name, plan_name, acronym, expansion, explanation)
+            VALUES %s;
+        """
         
         try:
             # Use execute_values for efficient batch insertion
             execute_values(cursor, insert_query, data_tuples)
             conn.commit()
-            logger.info(f"Successfully inserted {len(data_tuples)} records into {table_name}.")
+            logger.info(f"Successfully inserted or ignored {len(data_tuples)} records into {table_name}.")
         except Exception as e:
             conn.rollback()
             logger.error(f"Failed to insert acronyms into {table_name}: {e}")
