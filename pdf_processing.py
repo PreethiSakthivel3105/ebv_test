@@ -40,7 +40,6 @@ def extract_structured_data_with_llm(page_markdown: str):
 
     costs = {'tokens': 0, 'cost': 0.0, 'calls': 1}
     
-    # <<< START OF MODIFICATION: Heavily revised system prompt for accuracy >>>
     system_prompt = """
 You are a highly specialized data extraction agent for pharmaceutical formularies. Your task is to meticulously extract information ONLY from dedicated "legend", "key", or "glossary" sections on the page.
 
@@ -65,7 +64,7 @@ Return a JSON object with three keys:
 - `"acronyms"`: An array of objects ONLY for **formulary requirement codes**, with keys `acronym`, `expansion`, `explanation`.
 - `"tiers"`: An array of objects ONLY for **drug tier definitions**, with keys `acronym`, `expansion`, `explanation`.
 
-If a page has no relevant data, return: `{"drug_table": [], "acronyms": [], "tiers": []}`.
+If a page has no relevant data, a key is missing, or a list is empty, return it as an empty list. Example: `{"drug_table": [], "acronyms": [], "tiers": []}`.
 
 **Example of CORRECT Output:**
 {
@@ -81,7 +80,6 @@ If a page has no relevant data, return: `{"drug_table": [], "acronyms": [], "tie
   ]
 }
 """
-    # <<< END OF MODIFICATION >>>
 
     user_message = f"""
     --- Now process the following markdown and extract the required fields:
@@ -133,22 +131,26 @@ If a page has no relevant data, return: `{"drug_table": [], "acronyms": [], "tie
 
         logger.info(f"Successfully extracted {len(structured_data.get('drug_table', []))} drug records, {len(structured_data.get('acronyms', []))} acronyms, and {len(structured_data.get('tiers', []))} tiers from page.")
         
-        # Post-processing to filter out unwanted terms
+        # <<< START OF MODIFICATION >>>
+        # Post-processing to filter out unwanted terms and handle non-string data
         blocklist = {'nivel'}
         
         if 'acronyms' in structured_data:
             structured_data['acronyms'] = [
                 ac for ac in structured_data.get('acronyms', [])
-                if (ac.get('acronym') or '').lower() not in blocklist and \
-                   (ac.get('expansion') or '').lower() not in blocklist
+                # Convert to string before calling .lower() to prevent AttributeError
+                if str(ac.get('acronym') or '').lower() not in blocklist and \
+                   str(ac.get('expansion') or '').lower() not in blocklist
             ]
 
         if 'tiers' in structured_data:
             structured_data['tiers'] = [
                 tier for tier in structured_data.get('tiers', [])
-                if (tier.get('acronym') or '').lower() not in blocklist and \
-                   (tier.get('expansion') or '').lower() not in blocklist
+                # Convert to string before calling .lower() to prevent AttributeError
+                if str(tier.get('acronym') or '').lower() not in blocklist and \
+                   str(tier.get('expansion') or '').lower() not in blocklist
             ]
+        # <<< END OF MODIFICATION >>>
         
         return structured_data, costs
     
@@ -156,7 +158,7 @@ If a page has no relevant data, return: `{"drug_table": [], "acronyms": [], "tie
     except Exception as e:
         logger.error(f"Error in Claude 3 Haiku LLM data extraction: {e}")
         traceback.print_exc()
-        return [], costs
+        return {"drug_table": [], "acronyms": [], "tiers": []}, costs
 
 
 def process_pdf_with_mistral_ocr(pdf_input, mistral_client, payer_name=None):
@@ -203,7 +205,6 @@ def process_pdf_with_mistral_ocr(pdf_input, mistral_client, payer_name=None):
             for page_idx, page in enumerate(ocr_response.pages):
                 page_num = page_idx + 1
                 markdown_content = page.markdown
-                print(markdown_content)
                 all_raw_pages.append(markdown_content) 
 
                 if not markdown_content or len(markdown_content.strip()) < 50:
@@ -224,12 +225,12 @@ def process_pdf_with_mistral_ocr(pdf_input, mistral_client, payer_name=None):
                     total_costs['bedrock_calls'] += llm_costs.get('calls', 0)
                     
                     if structured_records:
-                        # Expecting dict with keys 'drug_table' and 'acronyms'
+                        # Ensure keys exist before extending
                         all_structured_data.extend(structured_records.get('drug_table', []))
                         all_acronyms.extend(structured_records.get('acronyms', []))
                         all_tiers.extend(structured_records.get('tiers', []))
                 except Exception as exc:
-                    logger.error(f"Page {page_num} generated an exception: {exc}")
+                    logger.error(f"Page {page_num} generated an exception during result processing: {exc}")
 
         # 3. Combine all raw markdown and structured results
         full_raw_content = "\n\n--- PAGE BREAK ---\n\n".join(all_raw_pages) 
@@ -260,8 +261,6 @@ def get_plan_and_payer_info(state_name, payer, plan_name):
         try:
             logger.info(f"Looking for: State='{state_name}', Payer='{payer}', Plan='{plan_name}'")
             
-            # normalized_payer = re.sub(r'[^a-zA-Z0-9 ]', '', str(payer)).replace(' ', '-').strip()
-            # normalized_plan_name = re.sub(r'[^a-zA-Z0-9 ]', '', str(plan_name)).replace(' ', '-').strip()
             normalized_payer = payer
             normalized_plan_name = plan_name
             exact_query = """
@@ -407,19 +406,14 @@ def process_single_pdf_worker(filename: str, pdf_folder_path: str):
             mistral_client = Mistral(api_key=MISTRAL_API_KEY)
             structured_df, raw_content, costs, all_acronyms, all_tiers = process_pdf_with_mistral_ocr(full_path, mistral_client, db_payer_name)
             
-            # <<< START OF MODIFICATION >>>
-            # Deduplicate entries found WITHIN this single PDF before inserting.
             dedup_acronyms = deduplicate_dicts(all_acronyms)
             dedup_tiers = deduplicate_dicts(all_tiers)
-            # <<< END OF MODIFICATION >>>
 
-            # Insert acronyms into requirements table, tiers into tier table
             if dedup_acronyms:
                 insert_acronyms_to_ref_table(dedup_acronyms, state_name, payer, plan_name, "PP_Formulary_Short_Codes_Ref")
             if dedup_tiers:
                 insert_acronyms_to_ref_table(dedup_tiers, state_name, payer, plan_name, "PP_Tier_Codes_Ref")
 
-            # Cache the result if structured data is not empty
             if not structured_df.empty:
                 cache_result(file_hash, structured_df, raw_content)
 
@@ -439,8 +433,6 @@ def process_single_pdf_worker(filename: str, pdf_folder_path: str):
                 if not cleaned_drug_name or len(cleaned_drug_name.strip()) < 2:
                     logger.debug(f"{log_prefix} Skipping short/empty drug name: {raw_drug_name!r}")
                     continue
-
-                
 
                 raw_tier = row.get('drug_tier', None)
                 drug_tier_normalized = normalize_drug_tier(raw_tier)
@@ -513,7 +505,6 @@ def process_single_pdf_url_worker(plan_info):
     log_prefix = f"[Worker for {plan_name}]"
     zero_costs = {'mistral_pages': 0, 'bedrock_tokens': 0, 'bedrock_cost': 0.0, 'bedrock_calls': 0}
     try:
-        # Download PDF to memory with browser headers
         headers = {
             "User-Agent": (
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -531,16 +522,11 @@ def process_single_pdf_url_worker(plan_info):
         pdf_bytes = BytesIO(resp.content)
 
         mistral_client = Mistral(api_key=MISTRAL_API_KEY)
-        # Pass BytesIO object to the processing function
         structured_df, raw_content, costs, all_acronyms, all_tiers = process_pdf_with_mistral_ocr(pdf_bytes, mistral_client, payer_name)
 
-        # <<< START OF MODIFICATION >>>
-        # Deduplicate entries found WITHIN this single PDF before inserting.
         dedup_acronyms = deduplicate_dicts(all_acronyms)
         dedup_tiers = deduplicate_dicts(all_tiers)
-        # <<< END OF MODIFICATION >>>
 
-        # Insert acronyms into requirements table, tiers into tier table
         if dedup_acronyms:
             insert_acronyms_to_ref_table(dedup_acronyms, state_name, payer_name, plan_name, "PP_Formulary_Short_Codes_Ref")
         if dedup_tiers:
@@ -593,7 +579,7 @@ def process_single_pdf_url_worker(plan_info):
         if processed_records:
             result_payload = {
                 "processed_records": processed_records,
-                "db_payer_name": payer_name, # Note: Using payer_name from DB
+                "db_payer_name": payer_name,
             }
             return 'SUCCESS', plan_name, result_payload, costs
         else:
@@ -618,8 +604,7 @@ def process_pdfs_from_urls_in_parallel():
         futures = {executor.submit(process_single_pdf_url_worker, plan): plan for plan in plans}
         
         for future in as_completed(futures):
-            original_plan_info = futures[future]
-            plan_name_log = original_plan_info # Get plan_name for logging
+            plan_name_log = futures[future]
             
             try:
                 status, _, result_data, costs = future.result()
@@ -657,7 +642,8 @@ def process_pdfs_from_urls_in_parallel():
     logger.info(f"Summary: {success_count} successful, {error_count} failed, {skipped_count} skipped")
     logger.info(f"Total structured records aggregated: {len(all_processed_data)}")
     return all_processed_data, {}
- 
+
+
 def deduplicate_dicts(dicts, keys=('acronym', 'expansion', 'explanation')):
     """
     Deduplicate a list of dicts based on the given keys, ignoring case and whitespace.
@@ -666,10 +652,8 @@ def deduplicate_dicts(dicts, keys=('acronym', 'expansion', 'explanation')):
     seen = set()
     deduped = []
     for d in dicts:
-        # Create a unique key based on the cleaned, lowercased values of the specified dictionary keys
         key = tuple((d.get(k) or '').strip().lower() for k in keys)
         
-        # Add the dictionary if its key hasn't been seen and at least one key has a non-empty value
         if key not in seen and any(val for val in key):
             seen.add(key)
             deduped.append(d)
