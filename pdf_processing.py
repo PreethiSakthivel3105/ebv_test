@@ -169,6 +169,29 @@ From the provided page, you must extract:
    - Extract the main list of drugs.
    - Each object in the list must have three keys: `drug_name`, `drug_tier`, `drug_requirements`.
 
+      Primary columns are "Drug name", "Drug tier", and "Requirements/Limits".
+    
+    Few Variations [example]:
+    drug_name: Match headers like: Drug Name, Medication, Brand Name, Generic Name, Formulary Drug, Product Name.
+    drug_tier: Match headers like: Tier, Drug Tier, Formulary Tier, Cost Tier, Tier Level.
+    drug_requirements: Match headers like: Requirements, Limits, Restrictions, Notes, PA, Prior Authorization, Step Therapy, QL, Quantity Limits, ST.
+    
+    Use keys: "drug_name", "drug_tier", "drug_requirements".
+
+    CRITICAL:
+    - Merge multiline drug names into a single drug_name.
+    - If a row has a drug tier value in a separate column (e.g., "Tier 1", "TIER 2", "1", "T1"), populate "drug_tier" with normalized values "Tier 1", "Tier 2", "Tier 3", "Tier 4", or null if unknown.
+    - drug_requirements holds prior auth / QL / PA details.
+    - Ignore section headers (ALL CAPS).
+
+    VERY VERY IMPORTANT NOTE---> INDEX PAGE DETECTION:
+    - If you detect this is an INDEX or TABLE OF CONTENTS page (containing patterns like "Drug Name.......41", "Medication..........123", or lines with drug names followed by dots and page numbers), DO NOT extract any data.
+    - INDEX INDICATORS: Lines with drug/medication names followed by multiple dots/periods and ending with numbers (page references).
+    - If index content is detected, return an "empty" JSON array.
+
+    Return ONLY a JSON array of objects with keys drug_name, drug_tier, drug_requirements.
+
+
 **2. `acronyms` (Formulary Requirement Codes):**
    - Find the "Key", "Legend", or "Glossary" section that defines requirement codes.
    - **MUST contain ONLY formulary requirement codes.** Examples: PA, QL, ST, MO, B/D, ED, LA.
