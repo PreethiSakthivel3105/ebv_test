@@ -33,6 +33,93 @@ logger = logging.getLogger(__name__)
 
 CLAUDE_3_HAIKU_MODEL_ID = "anthropic.claude-3-haiku-20240307-v1:0"
 
+import re
+import json
+import logging
+
+try:
+    import json5
+    JSON5_AVAILABLE = True
+except ImportError:
+    JSON5_AVAILABLE = False
+
+
+def robust_json_repair(json_string: str):
+    """
+    Attempts to repair malformed JSON returned by the LLM.
+    Always returns a dict with keys: drug_table, acronyms, tiers.
+    """
+    default_output = {"drug_table": [], "acronyms": [], "tiers": []}
+
+    if not isinstance(json_string, str) or not json_string.strip():
+        return default_output
+
+    # Step 1: Keep only the JSON-like content
+    json_string = re.sub(r'^[^{\[]+', '', json_string)
+    json_string = re.sub(r'[^}\]]+$', '', json_string)
+
+    # Step 2: Cleanup formatting issues
+    json_string = re.sub(r'[\r\n]+', ' ', json_string)
+    json_string = re.sub(r'\s+', ' ', json_string)
+    json_string = re.sub(r',\s*([}\]])', r'\1', json_string)
+    json_string = re.sub(r'"\s*"', '", "', json_string)
+    json_string = re.sub(r'}\s*{', '}, {', json_string)
+    json_string = re.sub(r'\]\s*\[', '], [', json_string)
+    json_string = re.sub(r'([{,]\s*)([A-Za-z_][A-Za-z0-9_]*)(\s*:)', r'\1"\2"\3', json_string)
+
+    # Step 3: Balance braces/brackets
+    open_curly, close_curly = json_string.count('{'), json_string.count('}')
+    if open_curly > close_curly:
+        json_string += '}' * (open_curly - close_curly)
+    elif close_curly > open_curly:
+        json_string = '{' * (close_curly - open_curly) + json_string
+
+    open_sq, close_sq = json_string.count('['), json_string.count(']')
+    if open_sq > close_sq:
+        json_string += ']' * (open_sq - close_sq)
+    elif close_sq > open_sq:
+        json_string = '[' * (close_sq - open_sq) + json_string
+
+    # Step 4: Try JSON5 if available
+    if JSON5_AVAILABLE:
+        try:
+            parsed = json5.loads(json_string)
+            return _sanitize_output(parsed, default_output)
+        except Exception:
+            pass
+
+    # Step 5: Try standard JSON
+    try:
+        parsed = json.loads(json_string)
+        return _sanitize_output(parsed, default_output)
+    except json.JSONDecodeError:
+        # Step 6: Last-resort comma fix and retry
+        json_string = re.sub(r'"\s*([{\[])', '", \1', json_string)
+        json_string = re.sub(r'([}\]])\s*"', r'\1, "', json_string)
+        try:
+            parsed = json.loads(json_string)
+            return _sanitize_output(parsed, default_output)
+        except json.JSONDecodeError as e2:
+            logging.error(f"JSON repair failed: {e2}")
+            logging.debug(f"Problematic JSON snippet: {json_string[:400]}...")
+            return default_output
+
+
+def _sanitize_output(parsed, default_output):
+    """
+    Ensures output always has expected keys.
+    """
+    if not isinstance(parsed, dict):
+        return default_output
+
+    sanitized = {
+        "drug_table": parsed.get("drug_table", []),
+        "acronyms": parsed.get("acronyms", []),
+        "tiers": parsed.get("tiers", []),
+    }
+    return sanitized
+
+
 def extract_metadata_from_filename(filename):
     """Extract state, payer, and plan name from filename"""
     base = os.path.splitext(filename)[0]
@@ -122,14 +209,17 @@ From the provided page, you must extract:
      ```
 Return a JSON object with three keys: `drug_table`, `acronyms`, and `tiers`.
 Extract data and return ONLY valid JSON with no additional text.
-Ensure:
+
+Format:
+{"drug_table": [...], "acronyms": [...], "tiers": [...]}
+If a section is missing, return its key with an empty list. Example: `{"drug_table": [], "acronyms": [], "tiers": []}`
+
+
+Strictly Ensure:
 - All strings are properly quoted
 - No trailing commas
 - Commas between all array/object elements
-- All quotes are properly escaped
-Format:
-{"drug_table": [...], "acronyms": [...], "tiers": [...]}
-If a section is missing, return its key with an empty list. Example: `{"drug_table": [], "acronyms": [], "tiers": []}`.
+- All quotes are properly escaped.
 """
     user_message = f"<INPUT_MARKDOWN>\n{page_markdown}\n</INPUT_MARKDOWN>"
 
@@ -164,18 +254,10 @@ If a section is missing, return its key with an empty list. Example: `{"drug_tab
             json_string = re.sub(r'}\s*{', r'},{', json_string)
             json_string = re.sub(r']\s*{', r'],{', json_string)
             json_string = re.sub(r'}\s*\[', r'},[', json_string)
+            json_string = re.sub(r']\s*\[', r'],[', json_string)
             
-            # 3. Fix unterminated strings by adding closing quote
-            lines = json_string.split('\n')
-            fixed_lines = []
-            for line in lines:
-                quote_count = line.count('"') - line.count('\\"')
-                if quote_count % 2 != 0 and ':' in line:
-                    line = re.sub(r'([^"\n,}\]]+)\s*([,}\]]?\s*)$', r'\1"\2', line.rstrip())
-                fixed_lines.append(line)
-            json_string = '\n'.join(fixed_lines)
-            
-            structured_data = json.loads(json_string, strict=False)
+            #structured_data = json.loads(json_string, strict=False)
+            structured_data = robust_json_repair(json_string)
             
         except json.JSONDecodeError as e2:
             logger.error(f"JSON repair failed. Error: {e2}")
