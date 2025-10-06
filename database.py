@@ -209,6 +209,12 @@ def ensure_database_schema():
             logger.debug(f"PP_Formulary_Short_Codes_Ref table creation issue (may already exist): {e}")
             conn.rollback()
 
+        _add_constraint(conn, cursor, """
+            ALTER TABLE PP_Formulary_Short_Codes_Ref
+            ADD CONSTRAINT uq_formulary_codes
+            UNIQUE (state_name, payer_name, plan_name, acronym)
+        """, "uq_formulary_codes")
+
         # Create PP_Tier_Codes_Ref table for tier definitions
         try:
             cursor.execute("""
@@ -227,6 +233,12 @@ def ensure_database_schema():
         except Exception as e:
             logger.debug(f"PP_Tier_Codes_Ref table creation issue (may already exist): {e}")
             conn.rollback()
+
+        _add_constraint(conn, cursor, """
+            ALTER TABLE PP_Tier_Codes_Ref
+            ADD CONSTRAINT uq_tier_codes
+            UNIQUE (state_name, payer_name, plan_name, acronym)
+        """, "uq_tier_codes")
 
         # Add new columns to existing drug_formulary_details if not exists
         try:
@@ -620,7 +632,7 @@ def process_and_cache_file(file_hash, structured_data, raw_content):
 def insert_acronyms_to_ref_table(acronyms, state_name, payer_name, plan_name, table_name):
     """
     Insert a list of acronyms into the specified reference table.
-    This version prevents the insertion of duplicate records for the same plan.
+    This version prevents duplicate records and updates existing ones with more complete information.
     """
     if not acronyms:
         return
@@ -628,7 +640,6 @@ def insert_acronyms_to_ref_table(acronyms, state_name, payer_name, plan_name, ta
     with get_db_connection() as conn:
         cursor = conn.cursor()
         
-        # Prepare data for execute_values for efficiency
         data_tuples = [
             (
                 state_name,
@@ -638,26 +649,29 @@ def insert_acronyms_to_ref_table(acronyms, state_name, payer_name, plan_name, ta
                 ac.get("expansion"),
                 ac.get("explanation"),
             )
-            for ac in acronyms if ac.get("acronym") # Ensure acronym is not null
+            for ac in acronyms if ac.get("acronym")
         ]
 
         if not data_tuples:
             logger.warning(f"No valid acronyms to insert into {table_name}.")
             return
 
-        # Use ON CONFLICT to prevent inserting the exact same record multiple times
-        # Note: The ON CONFLICT target columns should form a unique constraint.
-        # A good candidate is (plan_name, acronym, expansion)
+        # ON CONFLICT ensures that if a row with the same unique keys exists, we update it.
+        # We use COALESCE to update a field only if the new value is NOT NULL,
+        # effectively filling in missing details without overwriting existing data with nulls.
         insert_query = f"""
             INSERT INTO {table_name} (state_name, payer_name, plan_name, acronym, expansion, explanation)
-            VALUES %s;
+            VALUES %s
+            ON CONFLICT (state_name, payer_name, plan_name, acronym)
+            DO UPDATE SET
+                expansion = COALESCE(EXCLUDED.expansion, {table_name}.expansion),
+                explanation = COALESCE(EXCLUDED.explanation, {table_name}.explanation);
         """
         
         try:
-            # Use execute_values for efficient batch insertion
             execute_values(cursor, insert_query, data_tuples)
             conn.commit()
-            logger.info(f"Successfully inserted or ignored {len(data_tuples)} records into {table_name}.")
+            logger.info(f"Successfully inserted or updated {len(data_tuples)} records into {table_name}.")
         except Exception as e:
             conn.rollback()
             logger.error(f"Failed to insert acronyms into {table_name}: {e}")

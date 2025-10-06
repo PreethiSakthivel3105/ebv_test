@@ -57,6 +57,9 @@ BACKOFF_MULTIPLIER = 2
 BEDROCK_COST_PER_1K_TOKENS = 0.00022  # $0.00022 per 1000 tokens
 MISTRAL_OCR_COST_PER_1K_PAGES = 1.0   # $1.00 per 1000 pages
 
+CLIENT_TIMEOUT = 300.0  # 5 minutes for general read/write timeouts
+CONNECT_TIMEOUT = 15.0  # 15 seconds for establishing a connection
+
 # Global cost tracking dictionary
 COST_TRACKER = {
     'payer_costs': defaultdict(lambda: {

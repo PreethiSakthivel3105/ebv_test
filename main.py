@@ -3,6 +3,7 @@ import pandas as pd
 from datetime import datetime
 from pathlib import Path
 import uuid
+import multiprocessing
 
 from config import ALL_PROCESSED_DATA, COST_TRACKER
 from database import ensure_database_schema, insert_drug_formulary_data, update_plan_and_payer_statuses, update_drug_formulary_status
@@ -13,7 +14,7 @@ from utils import validate_required_files, detect_step_therapy
 logger = logging.getLogger(__name__)
 
 def safe_create_directory(path):
-    """Safely create directory with proper error handling""" 
+    """Safely create a directory if it does not exist."""
     try:
         Path(path).mkdir(parents=True, exist_ok=True)
         return True
@@ -180,4 +181,12 @@ def main():
         logger.info(f"GRAND TOTAL COST: ${COST_TRACKER['total_cost']:.8f}")
 
 if __name__ == "__main__":
+
+    try:
+        multiprocessing.set_start_method('spawn')
+    except RuntimeError:
+        # The start method can only be set once. This is to prevent errors
+        # in environments like Jupyter notebooks where the script might be re-run.
+        pass
+
     main()

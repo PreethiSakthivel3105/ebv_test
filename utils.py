@@ -671,10 +671,21 @@ def normalize_drug_tier(raw_tier):
     cleaned = clean_special_chars(raw_tier)
     return cleaned if cleaned else None
 
-def infer_drug_tier_from_text(text):
-    """Try to find tier/code mentions inside a longer text blob"""
-    if not text:
+def infer_drug_tier_from_text(text: Optional[str]) -> Optional[str]:
+    """
+    Tries to find explicit tier mentions (e.g., "Tier 1", "Tier 2") inside a longer text blob.
+    This is a conservative function to avoid incorrectly identifying dosages or other numbers as tiers.
+    """
+    if not text or pd.isna(text):
         return None
-        
-    cleaned = clean_special_chars(text)
-    return cleaned if cleaned else None
+
+    # Search for the pattern "Tier" followed by 1 or 2 digits.
+    # This is much safer than just cleaning the text and returning it.
+    match = re.search(r'(Tier\s*\d{1,2})', str(text), re.IGNORECASE)
+
+    if match:
+        # Return the found tier, e.g., "Tier 1"
+        return match.group(1).strip()
+
+    # If no "Tier X" pattern is found, return None to prevent incorrect inference.
+    return None
