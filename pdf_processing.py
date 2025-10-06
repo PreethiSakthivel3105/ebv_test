@@ -112,7 +112,6 @@ From the provided page, you must extract:
      - `acronym`: The tier identifier (e.g., "Tier 1", "Tier 2", "ACA").
      - `expansion`: The tier's name or type of drug (e.g., "Generic", "Preferred Drugs", "Non-Preferred Drug").
      - `explanation`: The detailed description of what the tier includes.
-
    - **Example:**
      ```json
      {
@@ -122,6 +121,14 @@ From the provided page, you must extract:
      }
      ```
 Return a JSON object with three keys: `drug_table`, `acronyms`, and `tiers`.
+Extract data and return ONLY valid JSON with no additional text.
+Ensure:
+- All strings are properly quoted
+- No trailing commas
+- Commas between all array/object elements
+- All quotes are properly escaped
+Format:
+{"drug_table": [...], "acronyms": [...], "tiers": [...]}
 If a section is missing, return its key with an empty list. Example: `{"drug_table": [], "acronyms": [], "tiers": []}`.
 """
     user_message = f"<INPUT_MARKDOWN>\n{page_markdown}\n</INPUT_MARKDOWN>"
@@ -150,13 +157,26 @@ If a section is missing, return its key with an empty list. Example: `{"drug_tab
         json_string = json_match.group(1)
         try:
             # More robust JSON repair:
-            # 1. Remove trailing commas from objects and lists, which is a common LLM error.
+            # 1. Remove trailing commas from objects and lists
             json_string = re.sub(r',\s*([}\]])', r'\1', json_string)
             
-            # 2. Handle common unescaped backslashes (less common but good to have)
-            json_string = json_string.replace('\\', '\\\\')
+            # 2. Add missing commas between adjacent objects/arrays (MOST COMMON ERROR)
+            json_string = re.sub(r'}\s*{', r'},{', json_string)
+            json_string = re.sub(r']\s*{', r'],{', json_string)
+            json_string = re.sub(r'}\s*\[', r'},[', json_string)
+            
+            # 3. Fix unterminated strings by adding closing quote
+            lines = json_string.split('\n')
+            fixed_lines = []
+            for line in lines:
+                quote_count = line.count('"') - line.count('\\"')
+                if quote_count % 2 != 0 and ':' in line:
+                    line = re.sub(r'([^"\n,}\]]+)\s*([,}\]]?\s*)$', r'\1"\2', line.rstrip())
+                fixed_lines.append(line)
+            json_string = '\n'.join(fixed_lines)
             
             structured_data = json.loads(json_string, strict=False)
+            
         except json.JSONDecodeError as e2:
             logger.error(f"JSON repair failed. Error: {e2}")
             logger.debug(f"Problematic JSON snippet: {json_string[:500]}...")
