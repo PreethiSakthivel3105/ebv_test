@@ -281,6 +281,22 @@ def ensure_database_schema():
             logger.debug(f"Status column may already exist in drug_formulary_details: {e}")
             conn.rollback()
 
+        try:
+            cursor.execute("""
+                ALTER TABLE drug_formulary_details
+                ADD COLUMN IF NOT EXISTS product_labeler_code VARCHAR(100),
+                ADD COLUMN IF NOT EXISTS product_proprietaryname TEXT;
+            """)
+            conn.commit()
+            logger.info("Ensured product mapping columns exist in drug_formulary_details.")
+        except Exception as e:
+            logger.debug(f"Product mapping columns may already exist: {e}")
+            conn.rollback()
+
+        # Add indexes for the new columns for better query performance
+        _add_index(conn, cursor, "CREATE INDEX IF NOT EXISTS idx_product_labeler_code ON drug_formulary_details(product_labeler_code)", "idx_product_labeler_code")
+        _add_index(conn, cursor, "CREATE INDEX IF NOT EXISTS idx_product_proprietaryname ON drug_formulary_details(product_proprietaryname)", "idx_product_proprietaryname")
+
         # Create partitions for better performance with 15-20M records
         # Create 8 partitions based on hash of plan_id
         for i in range(8):

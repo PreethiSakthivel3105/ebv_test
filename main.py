@@ -152,6 +152,7 @@ def main():
         logger.info("STEP 5: Updating final plan and payer statuses.")
         update_plan_and_payer_statuses(processed_plan_ids)
 
+
         logger.info("========================================")
         logger.info("DRUG FORMULARY PROCESSING COMPLETE")
         logger.info("========================================")

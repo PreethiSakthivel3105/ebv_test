@@ -11,6 +11,7 @@ import time
 import concurrent.futures
 
 from pathlib import Path
+from mistralai.models.sdkerror import SDKError
 from mistralai import Mistral
 from mistralai.models import DocumentURLChunk
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
@@ -62,24 +63,30 @@ From the provided page, you must extract:
 3.  **Drug Table Data**: The main drug list with columns: `drug_name`, `drug_tier`, `drug_requirements`.
 
 **CRITICAL RULES:**
-1.  **Extract ONLY from Explicit Definitions**: Extract acronyms and tiers ONLY if they are explicitly defined in a legend, key, glossary, or tier definition table on the page.
+1.  **Extract ONLY from Explicit Definitions**: Extract acronyms and tiers ONLY if they are explicitly defined in a legend, key, glossary, or tier definition table on the page. If a section is missing, return its key with an empty list.
 2.  **Strict Structure**: Your output MUST be a single JSON object with three keys: `drug_table`, `acronyms`, and `tiers`. If a section is missing, return its key with an empty list.
 3.  **English Only**: All extracted data must be in English.
 
-- **ACRONYMS (Requirement Codes)**:
+- **ACRONYMS (Formulary Requirement Codes)**:
     - **ONLY extract formulary requirement codes** (e.g., PA, QL, ST, MO, LD, B/D).
     - **DO NOT** extract plan types (HMO, PPO), dosage forms (HCL, ER), or general abbreviations (FDA).
-- **TIERS (Tier Definitions)**:
-    - **ONLY extract English drug tier definitions** (e.g., Tier 1, Tier 2, Preferred, Specialty).
+    - **CRITICAL**: The `acronyms` list **MUST NOT** contain any tier definitions or any Numbers.
+   - **DO NOT** include "Tier 1", "Tier 2", "Specialty Tier", "ACA", or plain numbers like "2", "3", "4". These are tiers.
 
+- **TIERS (Tier Definitions)**:
+    - **ONLY extract English drug tier definitions** (e.g., Tier 1, Tier 2, Preferred, Specialty, ACA).
+    - **CRITICAL**: **DO NOT** extract requirement codes like PA, QL, MO, or B/D into the `tiers` list. These belong ONLY in the `acronyms` list.
     **EXTRACTION DETAILS:**
 
 **1. `drug_table` (List of Objects):**
    - Extract the main list of drugs.
    - Each object in the list must have three keys: `drug_name`, `drug_tier`, `drug_requirements`.
 
-**2. `acronyms` (List of Objects):**
+**2. `acronyms` (Formulary Requirement Codes):**
    - Find the "Key", "Legend", or "Glossary" section that defines requirement codes.
+   - **MUST contain ONLY formulary requirement codes.** Examples: PA, QL, ST, MO, B/D, ED, LA.
+   - **CRITICAL**: The `acronyms` list **MUST NOT** contain any tier definitions.
+   - **DO NOT** include "Tier 1", "Tier 2", "Specialty Tier", "ACA", or plain numbers like "2", "3", "4". These are tiers.
    - **DO NOT** extract plan types (HMO, PPO), dosage forms (HCL, ER), or general abbreviations (FDA).
    - Each object must have three keys:
      - `acronym`: The abbreviation (e.g., "PA", "QL", "ST").
@@ -95,8 +102,11 @@ From the provided page, you must extract:
      }
      ```
 
-**3. `tiers` (List of Objects):**
+**3. `tiers` (Drug Tier Definitions):**
    - Find the section that defines the drug tiers.
+   - **MUST contain ONLY drug tier definitions.**
+   - A tier is typically "Tier" followed by a number (Tier 1, Tier 2), a number by itself (2, 3, 4), or a name (Specialty Tier, Preferred, ACA).
+   - **CRITICAL**: The `tiers` list **MUST NOT** contain formulary requirement codes like PA, QL, ST, MO. These belong in the `acronyms` list.
    - **DO NOT** extract tiers that are just numbers without a definition (e.g., if you see "Tier 27" in a drug table but there is no definition for it, ignore it). Tiers are typically numbered 1-6.
    - Each object must have three keys:
      - `acronym`: The tier identifier (e.g., "Tier 1", "Tier 2", "ACA").
@@ -400,19 +410,9 @@ def process_single_pdf_worker(filename: str, pdf_folder_path: str):
         if structured_df is None or structured_df.empty:
             logger.info(f"{log_prefix} Cache MISS. Starting full processing...")
             structured_df, raw_content, costs, all_acronyms, all_tiers = process_pdf_with_mistral_ocr(full_path, db_payer_name)
-            valid_tiers = []
-            for tier in all_tiers:
-                if isinstance(tier, dict) and 'acronym' in tier:
-                    # Use regex to find a number in the tier acronym
-                    match = re.search(r'\d+', str(tier['acronym']))
-                    if match:
-                        tier_num = int(match.group(0))
-                        if 1 <= tier_num <= 10:  # Allow tiers 1 through 10
-                            valid_tiers.append(tier)
-                    else:
-                        # If there's no number, it's a named tier like "ACA", which is valid.
-                        valid_tiers.append(tier)
-            all_tiers = valid_tiers
+            
+            all_acronyms, all_tiers = _reclassify_definitions(all_acronyms, all_tiers)
+            logger.info(f"Re-classified definitions. Final counts: {len(all_acronyms)} acronyms, {len(all_tiers)} tiers.")
 
             all_tiers = _parse_and_split_tier_definitions(all_tiers)
 
@@ -557,19 +557,8 @@ def process_single_pdf_url_worker(plan_info):
 
         structured_df, raw_content, costs, all_acronyms, all_tiers = process_pdf_with_mistral_ocr(pdf_bytes, payer_name)
 
-        valid_tiers = []
-        for tier in all_tiers:
-            if isinstance(tier, dict) and 'acronym' in tier:
-                # Use regex to find a number in the tier acronym
-                match = re.search(r'\d+', str(tier['acronym']))
-                if match:
-                    tier_num = int(match.group(0))
-                    if 1 <= tier_num <= 10:  # Allow tiers 1 through 10
-                        valid_tiers.append(tier)
-                else:
-                    # If there's no number, it's a named tier like "ACA", which is valid.
-                    valid_tiers.append(tier)
-        all_tiers = valid_tiers
+        all_acronyms, all_tiers = _reclassify_definitions(all_acronyms, all_tiers)
+        logger.info(f"Re-classified definitions. Final counts: {len(all_acronyms)} acronyms, {len(all_tiers)} tiers.")
 
         all_tiers = _parse_and_split_tier_definitions(all_tiers)
 
@@ -711,6 +700,48 @@ def deduplicate_dicts(dicts, primary_key='acronym'):
                 current_best['explanation'] = new_explanation
     
     return list(merged_entries.values())
+
+
+def _reclassify_definitions(acronyms_list: list, tiers_list: list) -> (list, list):
+    """
+    Sorts definitions into acronyms or tiers based on heuristics to correct LLM misclassifications.
+    This is a post-processing step to improve data quality without an extra LLM call.
+    """
+    if not tiers_list and not acronyms_list:
+        return [], []
+
+    corrected_acronyms = []
+    corrected_tiers = []
+    
+    # Define keywords that identify a definition as a tier, even if it doesn't start with "Tier".
+    TIER_KEYWORDS = {'aca', 'preventive', 'specialty', 'preferred', 'generic', 'brand'}
+
+    # First, check the list of items the LLM classified as tiers.
+    for item in tiers_list:
+        if not isinstance(item, dict): continue
+        acronym = str(item.get('acronym') or '').strip().lower()
+
+        # Rule: If it starts with "tier" or is a known tier keyword, it's a tier. Otherwise, it's a misclassified formulary code.
+        if acronym.startswith('tier') or acronym in TIER_KEYWORDS:
+            corrected_tiers.append(item)
+        else:
+            # This item is likely a formulary code, move it to the correct list.
+            corrected_acronyms.append(item)
+            
+    # Second, process the list the LLM already identified as acronyms.
+    # This loop is mostly for completeness and to catch edge cases.
+    for item in acronyms_list:
+        if not isinstance(item, dict): continue
+        acronym = str(item.get('acronym') or '').strip().lower()
+
+        # Rule: If an item in the acronyms list actually looks like a tier, move it. This is rare.
+        if acronym.startswith('tier') or acronym in TIER_KEYWORDS:
+            corrected_tiers.append(item)
+        else:
+            corrected_acronyms.append(item)
+
+    return corrected_acronyms, corrected_tiers
+
 
 def _parse_and_split_tier_definitions(tier_list: list) -> list:
     """
