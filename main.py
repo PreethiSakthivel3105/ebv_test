@@ -10,6 +10,7 @@ from database import ensure_database_schema, insert_drug_formulary_data, update_
 from excel_processing import populate_payer_and_plan_tables
 from pdf_processing import process_pdfs_from_urls_in_parallel
 from utils import validate_required_files, detect_step_therapy
+from product_labeler_mapping import map_product_labeler_codes
 
 logger = logging.getLogger(__name__)
 
@@ -21,8 +22,7 @@ def safe_create_directory(path):
     except Exception as e:
         logger.error(f"Failed to create directory {path}: {e}")
         return False
-
-# <<< START OF MODIFICATION >>>
+ 
 def save_cumulative_exports(all_processed_data):
     """Save all processed data to Excel and CSV files with enhanced error handling and new columns"""
     if not all_processed_data:
@@ -83,7 +83,6 @@ def save_cumulative_exports(all_processed_data):
         
     except Exception as e:
         logger.error(f"Error exporting to CSV: {e}")
-# <<< END OF MODIFICATION >>>
 
 
 def main():
@@ -152,6 +151,10 @@ def main():
         logger.info("STEP 5: Updating final plan and payer statuses.")
         update_plan_and_payer_statuses(processed_plan_ids)
 
+        #step 6: Map Product Labeler Codes
+        logger.info("STEP 6: Mapping Product Labeler Codes from product_master table to drug_formulary_details table.")
+
+        map_product_labeler_codes()
 
         logger.info("========================================")
         logger.info("DRUG FORMULARY PROCESSING COMPLETE")

@@ -149,7 +149,6 @@ If a section is missing, return its key with an empty list. Example: `{"drug_tab
 
         json_string = json_match.group(1)
         try:
-            # <<< START OF MODIFICATION >>>
             # More robust JSON repair:
             # 1. Remove trailing commas from objects and lists, which is a common LLM error.
             json_string = re.sub(r',\s*([}\]])', r'\1', json_string)
